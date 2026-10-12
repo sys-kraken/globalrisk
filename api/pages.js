@@ -25,6 +25,7 @@ module.exports = async (req, res) => {
       case 'guides': out = R.guidesHub(); break;
       case 'guide': out = R.guidePage(String(q.slug || '').toLowerCase()); break;
       case 'sitemap': out = await R.sitemap(); break;
+      case 'briefing': out = { status: 200, cache: 'public, s-maxage=600, stale-while-revalidate=3600', html: await R.briefing() }; break;
       default: out = R.notFound();
     }
   } catch (e) {

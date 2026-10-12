@@ -218,6 +218,7 @@ http
     {
       const p = u.pathname; let m;
       const to = (qs) => mountVercel('./api/pages', req, res, new URL('/?' + qs, 'http://localhost'));
+      if (p === '/api/briefing') return to('t=briefing');
       if (p === '/countries') return to('t=countries');
       if (p === '/events') return to('t=events');
       if (p === '/guides') return to('t=guides');

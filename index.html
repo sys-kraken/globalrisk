@@ -323,6 +323,20 @@
   </div>
 
   <div class="wrap">
+    <!-- DAILY BRIEFING: original summary written from the live event data (see /api/briefing) -->
+    <section class="info-section briefing briefing-top" id="sec-briefing" aria-label="Daily global risk briefing">
+      <div class="briefing-head">
+        <h2>Today's global risk briefing</h2>
+        <button type="button" class="briefing-toggle" id="briefing-toggle" aria-expanded="true" aria-controls="briefing-body">Hide</button>
+      </div>
+      <div id="briefing-body">
+        <p class="briefing-intro">A plain-language summary of what the data shows right now, written by GlobalRisk from the latest USGS, NASA and GDACS feeds, not copied from any news site.</p>
+        <div class="briefing-live" id="briefing-live">
+          <p>Loading the latest briefing…</p>
+        </div>
+      </div>
+    </section>
+
     <!-- MAP + COUNTRY PANEL -->
     <div class="map-grid">
       <section class="panel map-panel" id="sec-map">
@@ -593,22 +607,42 @@
       <div class="news-grid" id="news-grid"></div>
     </section>
 
-    <div class="footer">
-      WORLDNEWS aggregates public feeds in near real-time —
-      <a href="https://news.google.com" target="_blank" rel="noopener">Google News</a> ·
-      <a href="https://earthquake.usgs.gov" target="_blank" rel="noopener">USGS</a> ·
-      <a href="https://eonet.gsfc.nasa.gov" target="_blank" rel="noopener">NASA EONET</a> ·
-      <a href="https://www.gdacs.org" target="_blank" rel="noopener">GDACS</a><br />
-      Headlines link to original sources. For situational awareness only — not an official emergency service.<br />
-      <a href="/countries">Countries</a> ·
-      <a href="/events">Events</a> ·
-      <a href="/guides">Guides</a> ·
-      <a href="/about">About</a> ·
-      <a href="/methodology">Methodology</a> ·
-      <a href="/privacy">Privacy Policy</a> ·
-      <a href="/terms">Terms of Service</a> ·
-      <a href="/contact">Contact</a>
-    </div>
+    <section class="info-section" id="sec-guide" aria-label="How to read this dashboard">
+      <h2>How to read this dashboard</h2>
+      <div class="info-grid">
+        <article class="info-card">
+          <h3>Reading the map</h3>
+          <p>Each marker is one reported event. Select a marker to see its type, severity, time and a link to the original report. Use the buttons under the map to switch layers on and off, change the base map, or flip between the globe and the flat view. Active tropical storms are drawn with their recent track and forecast cone where the sources provide them.</p>
+        </article>
+
+        <article class="info-card">
+          <h3>Severity levels</h3>
+          <p>Every event is rated low, moderate, high or extreme. For earthquakes we map magnitude to these levels: under 4 is low, 4 to 4.9 moderate, 5 to 5.9 high, and 6 or more extreme. For disaster alerts we translate GDACS's Orange and Red levels to high and extreme. These ratings are ours and estimate potential concern, not confirmed damage.</p>
+        </article>
+
+        <article class="info-card">
+          <h3>How fresh is the data?</h3>
+          <p>Earthquake and alert feeds are checked every few minutes and storm tracks every fifteen. Sources publish at their own pace, so an event can appear minutes or hours after it happens, and early details such as magnitude are often revised. Every item shows its source so you can check the latest figures there.</p>
+        </article>
+
+        <article class="info-card">
+          <h3>What this is not</h3>
+          <p>GlobalRisk is a situational-awareness tool built from public data. It is not an emergency warning system and it does not predict events. For evacuation orders and safety instructions, follow your national and local authorities.</p>
+        </article>
+
+        <article class="info-card wide">
+          <h3>Go deeper</h3>
+          <p>
+            Browse <a href="/countries">risk by country</a> for maps and recent activity, or the list of <a href="/events">significant events</a>.
+            New to the terms? Start with <a href="/guides/earthquake-magnitude-explained">earthquake magnitude explained</a>,
+            <a href="/guides/gdacs-alert-levels-explained">GDACS alert levels</a>,
+            <a href="/guides/tropical-cyclone-categories-explained">cyclone categories</a> and
+            <a href="/guides/how-satellite-fire-detection-works">how satellites detect wildfires</a>,
+            or read our full <a href="/methodology">methodology and source list</a>.
+          </p>
+        </article>
+      </div>
+    </section>
 
     <section class="info-section" aria-label="About GlobalRisk">
       <h2>About GlobalRisk</h2>
@@ -643,6 +677,25 @@
         </article>
       </div>
     </section>
+
+    <div class="footer">
+      GlobalRisk aggregates public feeds in near real-time —
+      <a href="https://news.google.com" target="_blank" rel="noopener">Google News</a> ·
+      <a href="https://earthquake.usgs.gov" target="_blank" rel="noopener">USGS</a> ·
+      <a href="https://eonet.gsfc.nasa.gov" target="_blank" rel="noopener">NASA EONET</a> ·
+      <a href="https://www.gdacs.org" target="_blank" rel="noopener">GDACS</a> ·
+      <a href="https://www.nhc.noaa.gov" target="_blank" rel="noopener">NOAA NHC</a><br />
+      Headlines link to original sources. For situational awareness only — not an official emergency service.<br />
+      <a href="/countries">Countries</a> ·
+      <a href="/events">Events</a> ·
+      <a href="/guides">Guides</a> ·
+      <a href="/about">About</a> ·
+      <a href="/methodology">Methodology</a> ·
+      <a href="/privacy">Privacy Policy</a> ·
+      <a href="/terms">Terms of Service</a> ·
+      <a href="/contact">Contact</a><br />
+      © 2026 GlobalRisk
+    </div>
   </div>
 
   <!-- Toasts are the app's only transient feedback channel, so they must be spoken.
@@ -732,6 +785,34 @@
       window.va = window.va || function () {
         (window.vaq = window.vaq || []).push(arguments);
       };
+    </script>
+    <script>
+      /* Briefing show/hide. Expanded by default; a visitor who hides it stays hidden on later visits. */
+      (function () {
+        var sec = document.getElementById('sec-briefing'), btn = document.getElementById('briefing-toggle');
+        if (!sec || !btn) return;
+        function set(collapsed, save) {
+          sec.classList.toggle('collapsed', collapsed);
+          btn.textContent = collapsed ? 'Show' : 'Hide';
+          btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+          if (save) { try { localStorage.setItem('gr-briefing-collapsed', collapsed ? '1' : '0'); } catch (e) {} }
+        }
+        try { if (localStorage.getItem('gr-briefing-collapsed') === '1') set(true, false); } catch (e) {}
+        btn.addEventListener('click', function () {set(!sec.classList.contains('collapsed'), true);});
+      })();
+    </script>
+    <script>
+      /* Daily briefing: written server-side from the latest event data and injected here.
+         The section keeps its static explanatory text if the request fails. */
+      (function () {
+        var el = document.getElementById('briefing-live');
+        if (!el || !window.fetch) return;
+        fetch('/api/briefing').then(function (r) {return r.ok ? r.text() : Promise.reject();})
+          .then(function (html) {if (html) el.innerHTML = html;})
+          .catch(function () {
+            el.innerHTML = '<p>Live briefing is temporarily unavailable. Browse the <a href="/events">latest significant events</a> or the <a href="/countries">country index</a>.</p>';
+          });
+      })();
     </script>
     <script defer src="/_vercel/insights/script.js"></script>
 </body>

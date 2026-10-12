@@ -20,6 +20,7 @@
   ],
   "routes": [
     { "src": "/sitemap.xml", "dest": "/api/pages.js?t=sitemap" },
+    { "src": "/api/briefing", "dest": "/api/pages.js?t=briefing" },
     { "src": "/countries", "dest": "/api/pages.js?t=countries" },
     { "src": "/country/([^/]+)", "dest": "/api/pages.js?t=country&slug=$1" },
     { "src": "/events", "dest": "/api/pages.js?t=events" },

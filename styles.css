@@ -1747,3 +1747,28 @@ body {
   .ev-table td { display: block; border: 0; padding: 2px 0; }
   .ev-table td::before { content: attr(data-l) ': '; color: var(--ink-faint); font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
 }
+
+/* Homepage briefing */
+.briefing h3 { margin: 16px 0 8px; font-size: 16px; letter-spacing: 0.04em; color: var(--ink); }
+.briefing-live p { margin: 0 0 12px; color: var(--ink-dim); font-size: 15px; line-height: 1.7; }
+.briefing-live strong { color: var(--ink); }
+.briefing-live a { color: var(--cyan); text-decoration: none; }
+.briefing-live a:hover { text-decoration: underline; }
+.briefing-live ul.plain { margin: 0 0 12px; font-size: 14px; line-height: 1.8; color: var(--ink-dim); }
+
+/* Briefing placed above the map: compact, two columns on wide screens */
+.briefing-top { margin: 0 0 14px; padding: 14px 18px 8px; border: 1px solid var(--line); border-radius: var(--radius); }
+.briefing-top h2 { font-size: clamp(20px, 1.6vw, 26px); margin: 0 0 6px; }
+.briefing-intro { margin: 0 0 10px; color: var(--ink-faint); font-size: 13px; line-height: 1.5; }
+.briefing-top .briefing-live { columns: 2 420px; column-gap: 32px; }
+.briefing-top .briefing-live > p, .briefing-top .briefing-live > ul { break-inside: avoid; }
+.briefing-top .briefing-live > h3:first-child { margin-top: 0; column-span: all; }
+.briefing-top .briefing-live p { font-size: 14px; line-height: 1.65; }
+@media (max-width: 760px) { .briefing-top { padding: 12px 14px 4px; } }
+.briefing-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.briefing-head h2 { margin-bottom: 6px; }
+.briefing-toggle { flex: none; padding: 6px 14px; background: transparent; color: var(--cyan);
+  border: 1px solid var(--cyan-dim); border-radius: 999px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.8px; cursor: pointer; }
+.briefing-toggle:hover { background: rgba(56, 225, 255, 0.08); }
+.briefing-top.collapsed { padding-bottom: 10px; }
+.briefing-top.collapsed #briefing-body { display: none; }
