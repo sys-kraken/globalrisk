@@ -334,6 +334,7 @@
         <div class="briefing-live" id="briefing-live">
           <p>Loading the latest briefing…</p>
         </div>
+        <button type="button" class="briefing-more" id="briefing-more" aria-expanded="false">Read the full briefing</button>
       </div>
     </section>
 
@@ -605,6 +606,7 @@
       </div>
 
       <div class="news-grid" id="news-grid"></div>
+      <button type="button" class="news-more" id="news-more" aria-expanded="false" hidden>Show more stories</button>
     </section>
 
     <section class="info-section" id="sec-guide" aria-label="How to read this dashboard">
@@ -799,6 +801,62 @@
         }
         try { if (localStorage.getItem('gr-briefing-collapsed') === '1') set(true, false); } catch (e) {}
         btn.addEventListener('click', function () {set(!sec.classList.contains('collapsed'), true);});
+      })();
+    </script>
+    <script>
+      /* Phone compaction helpers. All visual collapsing lives in a max-width:620px
+         media query, so on larger screens these classes have no effect. */
+      (function () {
+        var NEWS_PREVIEW = 8;
+
+        // Briefing preview → full text.
+        var sec = document.getElementById('sec-briefing'), more = document.getElementById('briefing-more');
+        if (sec && more) more.addEventListener('click', function () {
+          var full = sec.classList.toggle('full');
+          more.textContent = full ? 'Show less' : 'Read the full briefing';
+          more.setAttribute('aria-expanded', full ? 'true' : 'false');
+        });
+
+        // News: first few stories, then "show more". app.js re-renders the grid, so watch it.
+        var news = document.getElementById('sec-news'), grid = document.getElementById('news-grid'),
+            nbtn = document.getElementById('news-more');
+        function syncNews() {
+          if (!grid || !nbtn) return;
+          var n = grid.children.length, all = news.classList.contains('all');
+          nbtn.hidden = n <= NEWS_PREVIEW;
+          nbtn.textContent = all ? 'Show fewer stories' : 'Show ' + (n - NEWS_PREVIEW) + ' more stories';
+          nbtn.setAttribute('aria-expanded', all ? 'true' : 'false');
+        }
+        if (news && grid && nbtn) {
+          nbtn.addEventListener('click', function () {
+            var wasAll = news.classList.toggle('all') === false;
+            syncNews();
+            if (wasAll) news.scrollIntoView({ block: 'start' });
+          });
+          if ('MutationObserver' in window) new MutationObserver(syncNews).observe(grid, { childList: true });
+          syncNews();
+        }
+
+        // Info / About cards → tap-to-open accordions on phones only. On wider screens the
+        // cards are always open, so they are plain headings there (no button semantics).
+        var phone = window.matchMedia ? window.matchMedia('(max-width: 620px)') : null;
+        var heads = Array.prototype.slice.call(document.querySelectorAll('.info-section .info-card > h3'));
+        function syncAcc() {
+          var on = !!(phone && phone.matches);
+          heads.forEach(function (h) {
+            if (on) {
+              h.setAttribute('role', 'button'); h.setAttribute('tabindex', '0');
+              h.setAttribute('aria-expanded', h.parentNode.classList.contains('open') ? 'true' : 'false');
+            } else { h.removeAttribute('role'); h.removeAttribute('tabindex'); h.removeAttribute('aria-expanded'); }
+          });
+        }
+        heads.forEach(function (h) {
+          function toggle() { if (!(phone && phone.matches)) return; h.parentNode.classList.toggle('open'); syncAcc(); }
+          h.addEventListener('click', toggle);
+          h.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+        });
+        if (phone) { if (phone.addEventListener) phone.addEventListener('change', syncAcc); else if (phone.addListener) phone.addListener(syncAcc); }
+        syncAcc();
       })();
     </script>
     <script>
