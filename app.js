@@ -159,7 +159,9 @@ const LABEL_SET = new Set(['USA','CAN','BRA','ARG','RUS','CHN','IND','AUS','ZAF'
 
 // NASA "Blue Marble" equirectangular basemap (public domain). Maps lon/lat
 // linearly, so it lines up exactly with the SVG projection, markers and labels.
-const SAT_URL = 'https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57752/land_shallow_topo_2048.jpg';
+// Served by GIBS with open CORS, so the canvas can read it without a proxy.
+const SAT_URL = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap'
+  + '&FORMAT=image/jpeg&SRS=EPSG:4326&STYLES=&WIDTH=2048&HEIGHT=1024&BBOX=-180,-90,180,90&LAYERS=BlueMarble_NextGeneration';
 
 const STOPWORDS = new Set(('the a an and or of to in on for with from at by as is are was were be been will '
   + 'says said after over amid into new news world could would about more than that this his her its their '
@@ -349,6 +351,17 @@ function buildMap() {
   sat.setAttributeNS('http://www.w3.org/1999/xlink', 'href', SAT_URL);
   svg.appendChild(sat);
 
+  // El Niño layer on the flat map (see EL NINO LAYER below)
+  const enso = document.createElementNS(SVGNS, 'image');
+  enso.setAttribute('id', 'enso-layer');
+  enso.setAttribute('x', 0); enso.setAttribute('y', 0);
+  enso.setAttribute('width', W); enso.setAttribute('height', H);
+  enso.setAttribute('preserveAspectRatio', 'none');
+  svg.appendChild(enso);
+  const ensoBoxes = document.createElementNS(SVGNS, 'g');
+  ensoBoxes.setAttribute('id', 'enso-boxes');
+  svg.appendChild(ensoBoxes);
+
   // ocean graticule (meridians / parallels)
   const grat = document.createElementNS(SVGNS, 'g');
   grat.setAttribute('class', 'graticule');
@@ -429,7 +442,8 @@ function buildMap() {
 
 function showTip(e, html) {
   const r = stage.getBoundingClientRect();
-  tooltip.innerHTML = html;
+  tipIsCoordsOnly = false;
+  tooltip.innerHTML = html + pointerReadout(e);
   tooltip.classList.add('show');
   let x = e.clientX - r.left + 14, y = e.clientY - r.top + 14;
   if (x + tooltip.offsetWidth > r.width) x = e.clientX - r.left - tooltip.offsetWidth - 12;
@@ -437,7 +451,37 @@ function showTip(e, html) {
   tooltip.style.left = x + 'px';
   tooltip.style.top = y + 'px';
 }
-const hideTip = () => tooltip.classList.remove('show');
+const hideTip = () => { tooltip.classList.remove('show'); tipIsCoordsOnly = false; };
+
+// Every map tooltip ends with where the pointer is; over open ocean it's the whole tooltip.
+let tipIsCoordsOnly = false;
+function pointerLonLat(e) {
+  if (state.globe.on) {
+    const r = stage.getBoundingClientRect();
+    return unprojectGlobe(e.clientX - r.left, e.clientY - r.top);
+  }
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return null;
+  const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+  if (p.x < 0 || p.x > W || p.y < 0 || p.y > H) return null;
+  return { lon: p.x / W * 360 - 180, lat: 90 - p.y / H * 180 };
+}
+function pointerReadout(e) {
+  const q = pointerLonLat(e);
+  if (!q) return '';
+  // More decimals as you zoom: 0.1° is about 11 km, which is useless at street level.
+  const digits = !state.globe.on ? 1 : globeTileZoom >= 12 ? 4 : globeTileZoom >= 8 ? 3 : globeTileZoom >= 5 ? 2 : 1;
+  const coords = Math.abs(q.lat).toFixed(digits) + '°' + (q.lat >= 0 ? 'N' : 'S') + ', ' + Math.abs(q.lon).toFixed(digits) + '°' + (q.lon >= 0 ? 'E' : 'W');
+  const sst = ensoValueAt(q.lon, q.lat);
+  return '<div class="tt-coords">' + (sst ? '<strong>' + sst + '</strong> vs usual · ' : '') + coords + '</div>';
+}
+function ensoValueAt(lon, lat) {
+  if (!ensoOn || !ensoTex || (state.globe.on && globeTileZoom >= TILE_FLAT_Z)) return null;
+  const x = Math.min(ensoTex.w - 1, Math.floor((lon + 180) / 360 * ensoTex.w));
+  const y = Math.min(ensoTex.h - 1, Math.floor((90 - lat) / 180 * ensoTex.h));
+  const i = (y * ensoTex.w + x) * 4, d = ensoTex.data;
+  return window.SST ? window.SST.label(d[i], d[i + 1], d[i + 2], d[i + 3]) : null;
+}
 
 /* ---- shared event presentation (tooltip + in-app detail card) ---------- */
 function eventSource(h) {
@@ -569,6 +613,7 @@ stage.addEventListener('click', closeEventDetail);             // clicking empty
    ========================================================================== */
 const GX = 500, GY = 250, RAD = Math.PI / 180;
 const gEls = {};
+let ensoCanvas = null, ensoOn = false, ensoTex = null, ensoLoading = false, ensoInfo = null;
 let gCanvas = null, baseCanvas = null, gFeatures = [], gDirty = true, mapDragging = false, settleT = 0;
 let texData = null, texW = 0, texH = 0, texLoading = false;
 let satCanvas = null, satData = [], orbitsOn = false, orbitsLoading = false, satLastProp = 0;
@@ -654,6 +699,10 @@ function buildGlobe() {
   gCanvas = document.createElement('canvas');
   gCanvas.className = 'globe-canvas';
   stage.insertBefore(gCanvas, svg);
+
+  ensoCanvas = document.createElement('canvas');
+  ensoCanvas.className = 'globe-canvas enso-canvas';
+  stage.insertBefore(ensoCanvas, svg);   // over the imagery, under outlines and markers
 
   satCanvas = document.createElement('canvas');
   satCanvas.className = 'sat-canvas';
@@ -756,10 +805,12 @@ function updateGlobeLabels() {
 }
 
 /* ---- satellite texture on the sphere --------------------------------- */
+let texTries = 0;
 function loadTexture() {
   if (texData || texLoading) return;
   texLoading = true;
   const im = new Image();
+  im.crossOrigin = 'anonymous';
   im.onload = () => {
     try {
       const c = document.createElement('canvas');
@@ -773,8 +824,12 @@ function loadTexture() {
     texLoading = false;
     syncSatCanvas();
   };
-  im.onerror = () => { texLoading = false; };
-  im.src = proxy(SAT_URL);   // same-origin via proxy so getImageData works
+  im.onerror = () => {
+    texLoading = false;
+    if (++texTries < 3) setTimeout(loadTexture, 3000 * texTries);
+    else console.warn('globe texture unavailable after ' + texTries + ' tries');
+  };
+  im.src = SAT_URL;
 }
 function syncSatCanvas() {
   if (gCanvas) gCanvas.style.display =
@@ -782,8 +837,10 @@ function syncSatCanvas() {
 }
 
 // Inverse orthographic per pixel: screen → sphere → lon/lat → texture.
-function paintSphere(canvas, quality) {
-  if (!texData || !canvas) return false;
+// `tex` defaults to the Blue Marble; overlays pass their own and keep their alpha.
+function paintSphere(canvas, quality, tex) {
+  const td = tex ? tex.data : texData, tw = tex ? tex.w : texW, th = tex ? tex.h : texH;
+  if (!td || !canvas) return false;
   const rect = stage.getBoundingClientRect();
   if (!rect.width) return false;
   const q = quality * Math.min(window.devicePixelRatio || 1, 1.5);
@@ -797,7 +854,7 @@ function paintSphere(canvas, quality) {
   const cosp0 = Math.cos(g.lat * RAD), sinp0 = Math.sin(g.lat * RAD);
   const lonFrac = (g.lon + 180) / 360, INV2PI = 1 / (2 * Math.PI), INVPI = 1 / Math.PI;
   const img = ctx.createImageData(cw, ch);
-  const d = img.data, td = texData;
+  const d = img.data;
   const j0 = Math.max(0, Math.floor(cyp - R)), j1 = Math.min(ch - 1, Math.ceil(cyp + R));
   for (let j = j0; j <= j1; j++) {
     const b = (cyp - (j + 0.5)) / R, b2 = b * b;
@@ -813,11 +870,11 @@ function paintSphere(canvas, quality) {
       const lam = Math.atan2(a, c * cosp0 - b * sinp0);
       let fx = lam * INV2PI + lonFrac;
       fx -= Math.floor(fx);
-      const tx = (fx * texW) | 0;
-      const ty = Math.min(texH - 1, Math.max(0, ((0.5 - lat * INVPI) * texH) | 0));
-      const si = (ty * texW + tx) << 2, di = (j * cw + i) << 2;
+      const tx = (fx * tw) | 0;
+      const ty = Math.min(th - 1, Math.max(0, ((0.5 - lat * INVPI) * th) | 0));
+      const si = (ty * tw + tx) << 2, di = (j * cw + i) << 2;
       const sh = 0.6 + 0.4 * c;                    // limb darkening
-      d[di] = td[si] * sh; d[di + 1] = td[si + 1] * sh; d[di + 2] = td[si + 2] * sh; d[di + 3] = 255;
+      d[di] = td[si] * sh; d[di + 1] = td[si + 1] * sh; d[di + 2] = td[si + 2] * sh; d[di + 3] = tex ? td[si + 3] : 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -826,7 +883,10 @@ function paintSphere(canvas, quality) {
 function drawTexture(quality) { return paintSphere(gCanvas, quality); }
 function scheduleSettle() {
   clearTimeout(settleT);
-  settleT = setTimeout(() => { if (state.globe.on && state.satOn) drawGlobeImagery(false); }, 240);
+  settleT = setTimeout(() => {
+    if (state.globe.on && state.satOn) drawGlobeImagery(false);
+    drawEnso(false);
+  }, 240);
 }
 
 /* ==========================================================================
@@ -1078,6 +1138,163 @@ function drawGlobeImagery(moving, met, z) {
     if (paintSphere(baseCanvas, 0.3)) ctx.drawImage(baseCanvas, 0, 0, cw, ch);
   }
   drawTiles(zoom, ctx, cw, ch, m);
+}
+
+/* ==========================================================================
+   EL NINO LAYER — NASA's daily sea temperature anomaly as one whole-world
+   equirectangular image: painted onto the sphere on the globe, and laid straight
+   into the SVG on the flat map. Full tracker at /el-nino.
+   ========================================================================== */
+const ENSO_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap'
+  + '&FORMAT=image/png&TRANSPARENT=TRUE&SRS=EPSG:4326&STYLES=&WIDTH=2048&HEIGHT=1024&BBOX=-180,-90,180,90'
+  + '&LAYERS=GHRSST_L4_MUR_Sea_Surface_Temperature_Anomalies&TIME=';
+// NASA answers 200 with a blank image of about 8 KB for days not yet published.
+const ENSO_MIN_BYTES = 50000;
+const ENSO_LOOKBACK_DAYS = 7;
+
+async function fetchEnsoImage() {
+  for (let back = 1; back <= ENSO_LOOKBACK_DAYS; back++) {
+    const date = new Date(Date.now() - back * 864e5).toISOString().slice(0, 10);
+    try {
+      const r = await fetch(ENSO_WMS + date);
+      if (!r.ok) continue;
+      const blob = await r.blob();
+      if (blob.size >= ENSO_MIN_BYTES) return { blob, date };
+    } catch (e) { /* try the day before */ }
+  }
+  return null;
+}
+
+async function loadEnsoLayer() {
+  if (ensoTex || ensoLoading) return;
+  ensoLoading = true;
+  syncEnso();
+  // The readings are extras: the layer still works if this one fails.
+  fetch('/api/enso').then((r) => (r.ok ? r.json() : null)).then((j) => {
+    if (!j) return;
+    ensoInfo = j;
+    syncEnso(); buildEnsoFlatBoxes(); markGlobeDirty(); scheduleSettle();
+  }).catch(() => {});
+  const got = await fetchEnsoImage();
+  try {
+    if (!got) throw new Error('no imagery');
+    const url = URL.createObjectURL(got.blob);
+    const im = new Image();
+    im.src = url;
+    await im.decode();
+    const c = document.createElement('canvas');
+    c.width = im.naturalWidth; c.height = im.naturalHeight;
+    const cx2 = c.getContext('2d');
+    cx2.drawImage(im, 0, 0);
+    ensoTex = { data: cx2.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height, date: got.date };
+    $('#enso-layer').setAttribute('href', url);
+  } catch (e) {
+    console.warn('El Niño layer unavailable:', e.message);
+    toast('Sea temperature imagery is unavailable right now', true);
+    ensoOn = false;
+    $('#toggle-enso').classList.add('off');
+  }
+  ensoLoading = false;
+  syncEnso(); markGlobeDirty(); scheduleSettle();
+}
+
+function syncEnso() {
+  const ready = ensoOn && !!ensoTex;
+  svg.classList.toggle('enso', ready);
+  if (ensoCanvas) ensoCanvas.style.display = ready && state.globe.on ? 'block' : 'none';
+  const chip = $('#enso-chip');
+  chip.hidden = !ensoOn;
+  if (!ensoOn) return;
+  const main = ensoInfo && ensoInfo.regions.find((r) => r.id === 'nino34');
+  $('#enso-chip-state').textContent = ensoLoading ? 'Loading NASA imagery…'
+    : [ensoInfo && ensoInfo.status, main && main.anom != null ? 'Niño 3.4 ' + (main.anom < 0 ? '−' : '+') + Math.abs(main.anom).toFixed(1) + '°C' : ''].filter(Boolean).join(' · ');
+  $('#enso-chip-date').textContent = ensoTex ? 'NASA MUR · ' + new Date(ensoTex.date + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : '';
+}
+
+function drawEnso(moving) {
+  if (!ensoOn || !ensoTex || !ensoCanvas || !state.globe.on) return;
+  // Past this zoom the image's ~20 km pixels would only smother the street imagery.
+  const hide = globeTileZoom >= TILE_FLAT_Z;
+  const disp = hide ? 'none' : 'block';
+  if (ensoCanvas.style.display !== disp) ensoCanvas.style.display = disp;
+  if (hide) return;
+  if (paintSphere(ensoCanvas, moving ? 0.45 : 1, ensoTex)) drawEnsoGlobeBoxes();
+}
+
+const ensoLabel = (r) => r.name + (r.anom == null ? '' : ' ' + (r.anom < 0 ? '−' : '+') + Math.abs(r.anom).toFixed(1) + '°C');
+
+function drawEnsoGlobeBoxes() {
+  if (!ensoInfo) return;
+  const met = stageMetrics();
+  const k = ensoCanvas.width / met.w;
+  const X = (p) => ensoCanvas.width / 2 + (p.x - GX) * met.s * k;
+  const Y = (p) => ensoCanvas.height / 2 + (p.y - GY) * met.s * k;
+  const ctx = ensoCanvas.getContext('2d');
+  for (const r of ensoInfo.regions) {
+    const main = r.id === 'nino34';
+    const corners = [[r.w, r.n], [r.e, r.n], [r.e, r.s], [r.w, r.s], [r.w, r.n]];
+    ctx.beginPath();
+    let pen = false;
+    for (let c = 0; c < 4; c++) {
+      const steps = Math.max(1, Math.round(Math.abs(corners[c + 1][0] - corners[c][0]) / 3));
+      for (let i = 0; i <= steps; i++) {
+        const p = globeProject(corners[c][0] + (corners[c + 1][0] - corners[c][0]) * i / steps, corners[c][1] + (corners[c + 1][1] - corners[c][1]) * i / steps);
+        if (!p.vis) { pen = false; continue; }
+        if (pen) ctx.lineTo(X(p), Y(p)); else ctx.moveTo(X(p), Y(p));
+        pen = true;
+      }
+    }
+    ctx.setLineDash(main ? [] : [5 * k, 4 * k]);
+    ctx.lineWidth = (main ? 2 : 1) * k;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const at = globeProject(r.w, r.id === 'nino12' ? r.s : r.n);
+    if (!at.vis) continue;
+    const text = ensoLabel(r);
+    ctx.font = (main ? '600 ' : '') + (11 * k) + 'px system-ui, sans-serif';
+    // Niño 3 and 4 share a top edge: on a small globe their labels would overlap, so they drop out.
+    if (r.id === 'nino3' || r.id === 'nino4') {
+      const east = globeProject(r.e, r.n);
+      if (!east.vis || X(east) - X(at) < ctx.measureText(text).width) continue;
+    }
+
+    // Niño 3.4 sits inside Niño 3 and Niño 4 along the same top edge: lift its label clear.
+    const ly = Y(at) + (r.id === 'nino12' ? 14 : r.id === 'nino34' ? -18 : -4) * k;
+    ctx.lineWidth = 3 * k;
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(text, X(at) + 2 * k, ly);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, X(at) + 2 * k, ly);
+  }
+}
+
+// Flat map: plain SVG rectangles, split where a box crosses the date line.
+function buildEnsoFlatBoxes() {
+  const g = $('#enso-boxes');
+  if (!g || !ensoInfo) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  g.textContent = '';
+  const rect = (w, e, r) => {
+    const [x0, y0] = project(w, r.n), [x1, y1] = project(e, r.s);
+    const el = document.createElementNS(NS, 'rect');
+    el.setAttribute('x', x0); el.setAttribute('y', y0);
+    el.setAttribute('width', x1 - x0); el.setAttribute('height', y1 - y0);
+    if (r.id === 'nino34') el.setAttribute('class', 'main');
+    g.appendChild(el);
+  };
+  for (const r of ensoInfo.regions) {
+    if (r.w < 180 && r.e > 180) { rect(r.w, 180, r); rect(-180, r.e - 360, r); }
+    else if (r.w >= 180) rect(r.w - 360, r.e - 360, r);
+    else rect(r.w, r.e, r);
+    const lon = r.w >= 180 ? r.w - 360 : r.w;
+    const [x, y] = project(lon, r.id === 'nino12' ? r.s : r.n);
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', x + 1);
+    t.setAttribute('y', y + (r.id === 'nino12' ? 9 : r.id === 'nino34' ? -9 : -2));
+    t.textContent = ensoLabel(r);
+    g.appendChild(t);
+  }
 }
 
 /* ---- the patch of world currently on screen (used to cull vectors) ----- */
@@ -2456,10 +2673,9 @@ function globeFrame() {
     if (firesOn && state.fireEls.length) updateGlobeFires();
     updateGlobeLabels();
     if (stormsOn && storms.length && !globeDeep) renderStorms();
-    if (state.satOn) {
-      const moving = g.auto || mapDragging || performance.now() - lastInput < 200;
-      drawGlobeImagery(moving, met, globeTileZoom);
-    }
+    const moving = g.auto || mapDragging || performance.now() - lastInput < 200;
+    if (state.satOn) drawGlobeImagery(moving, met, globeTileZoom);
+    drawEnso(moving);
     updateMapChrome(met, globeTileZoom);
   }
   // satellites keep orbiting even when the globe is still
@@ -2523,6 +2739,7 @@ function setMapMode(mode) {
     ? 'Drag to spin · Ctrl+scroll to zoom in to street level'
     : 'Ctrl + scroll to zoom · drag to pan · click a country';
   syncSatCanvas();
+  syncEnso();
   syncSatOrbits();
   syncFlights();
   syncCams();
@@ -2747,6 +2964,25 @@ function setupMapInteraction() {
     $('#toggle-streets').classList.toggle('off', state.mapStyle !== 'streets');
     ensureImagery();
     markGlobeDirty(); scheduleSettle();
+  };
+
+  // Runs after the map's own handlers, so a country or marker tooltip takes priority.
+  stage.addEventListener('mousemove', (e) => {
+    if (tooltip.classList.contains('show') && !tipIsCoordsOnly) return;
+    if (mapDragging || !pointerLonLat(e)) { if (tipIsCoordsOnly) hideTip(); return; }
+    showTip(e, '');
+    tipIsCoordsOnly = true;
+  });
+  stage.addEventListener('mouseleave', () => { if (tipIsCoordsOnly) hideTip(); });
+
+  $('#toggle-enso').onclick = () => {
+    ensoOn = !ensoOn;
+    $('#toggle-enso').classList.toggle('off', !ensoOn);
+    if (ensoOn) {
+      loadEnsoLayer();
+      if (state.globe.on) rotateTo(-150, 0);   // the story is in the Pacific
+    }
+    syncEnso(); markGlobeDirty(); scheduleSettle();
   };
 
   $('#toggle-cams').onclick = () => {
@@ -4035,6 +4271,7 @@ function init() {
   setMapMode('globe');
   loadTexture();
   startGlobeLoop();
+  if (new URLSearchParams(location.search).has('enso')) $('#toggle-enso').click();
 
   $('#search-form').addEventListener('submit', (e) => {
     e.preventDefault();

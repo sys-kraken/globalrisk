@@ -395,6 +395,13 @@
               <span class="fl-note" id="flight-note"></span>
             </div>
           </div>
+          <div class="enso-chip" id="enso-chip" hidden>
+            <div class="enso-chip-title">Sea temperature vs usual</div>
+            <div class="enso-chip-bar"></div>
+            <div class="enso-chip-ticks"><span>−3°C</span><span>0</span><span>+3°C</span></div>
+            <div class="enso-chip-note" id="enso-chip-state" role="status"></div>
+            <div class="enso-chip-note"><span id="enso-chip-date"></span> <a href="/el-nino">Full tracker</a></div>
+          </div>
           <div class="map-scale" id="map-scale"><span class="ms-bar"></span><span class="ms-txt"></span></div>
           <div class="map-credit" id="map-credit"></div>
         </div>
@@ -429,6 +436,7 @@
           <span class="layer-toggle cm off" id="toggle-cams"
             title="Public traffic cameras — click one for the authority's live view"><span
               class="swatch"></span>Cameras<span id="cam-count"></span></span>
+          <span class="layer-toggle en off" id="toggle-enso" title="El Niño: NASA sea temperature compared with usual, with the Niño regions outlined"><span class="swatch"></span>El Niño</span>
           <span class="grow"></span>
           <span class="map-hint" id="map-hint">Drag to spin · Ctrl+scroll to zoom · click a country</span>
           <span class="layer-toggle" id="toggle-fs" style="cursor:pointer" title="Full screen map"><svg class="i"
@@ -690,6 +698,7 @@
       Headlines link to original sources. For situational awareness only — not an official emergency service.<br />
       <a href="/countries">Countries</a> ·
       <a href="/events">Events</a> ·
+      <a href="/el-nino">El Niño</a> ·
       <a href="/guides">Guides</a> ·
       <a href="/about">About</a> ·
       <a href="/methodology">Methodology</a> ·
@@ -751,6 +760,7 @@
 
   <script src="world-data.js"></script>
   <script src="satellite.min.js"></script>
+  <script src="sst-colors.js"></script>
   <script src="app.js"></script>
   <script>
     /* Mobile HUD command bar — highlight the section currently in view.

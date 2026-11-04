@@ -61,7 +61,6 @@ const ALLOWED_HOSTS = new Set([
   'eonet.gsfc.nasa.gov',
   'www.gdacs.org',
   'www.nhc.noaa.gov',       // NOAA National Hurricane Center active storms
-  'eoimages.gsfc.nasa.gov', // Blue Marble texture (proxied so canvas isn't tainted)
   'celestrak.org',          // satellite TLE orbital elements
   'translate.googleapis.com', // headline translation
 ]);
@@ -222,6 +221,8 @@ http
       if (p === '/countries') return to('t=countries');
       if (p === '/events') return to('t=events');
       if (p === '/guides') return to('t=guides');
+      if (p === '/el-nino') return to('t=enso');
+      if (p === '/api/enso') return to('t=ensodata');
       if ((m = /^\/country\/([^/]+)$/.exec(p))) return to('t=country&slug=' + m[1]);
       if ((m = /^\/event\/([^/]+)(?:\/[^/]*)?$/.exec(p))) return to('t=event&id=' + m[1]);
       if ((m = /^\/guides\/([^/]+)$/.exec(p))) return to('t=guide&slug=' + m[1]);

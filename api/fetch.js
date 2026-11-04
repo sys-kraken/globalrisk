@@ -10,7 +10,6 @@ const ALLOWED_HOSTS = new Set([
   'eonet.gsfc.nasa.gov',
   'www.gdacs.org',
   'www.nhc.noaa.gov',       // NOAA National Hurricane Center active storms
-  'eoimages.gsfc.nasa.gov', // Blue Marble texture (proxied so canvas isn't tainted)
   'celestrak.org',          // satellite TLE orbital elements
   'translate.googleapis.com', // headline translation
 ]);

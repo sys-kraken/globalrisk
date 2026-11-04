@@ -6,6 +6,7 @@
  *   /countries            → ?t=countries      /country/:slug        → ?t=country&slug=
  *   /events               → ?t=events         /event/:id[/:slug]    → ?t=event&id=
  *   /guides               → ?t=guides         /guides/:slug         → ?t=guide&slug=
+ *   /el-nino              → ?t=enso           /api/enso             → ?t=ensodata
  *   /sitemap.xml          → ?t=sitemap
  *
  * Responses are cached at Vercel's edge (s-maxage) so crawlers and visitors
@@ -24,6 +25,8 @@ module.exports = async (req, res) => {
       case 'events': out = await R.eventsHub(); break;
       case 'guides': out = R.guidesHub(); break;
       case 'guide': out = R.guidePage(String(q.slug || '').toLowerCase()); break;
+      case 'enso': out = await require('../lib/site/enso').ensoPage(); break;
+      case 'ensodata': out = await require('../lib/site/enso').ensoJson(); break;
       case 'sitemap': out = await R.sitemap(); break;
       case 'briefing': out = { status: 200, cache: 'public, s-maxage=600, stale-while-revalidate=3600', html: await R.briefing() }; break;
       default: out = R.notFound();

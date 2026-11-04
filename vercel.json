@@ -14,6 +14,8 @@
     { "src": "app.js", "use": "@vercel/static" },
     { "src": "sw.js", "use": "@vercel/static" },
     { "src": "world-data.js", "use": "@vercel/static" },
+    { "src": "el-nino.js", "use": "@vercel/static" },
+    { "src": "sst-colors.js", "use": "@vercel/static" },
     { "src": "satellite.min.js", "use": "@vercel/static" },
     { "src": "hls.light.min.js", "use": "@vercel/static" },
     { "src": "api/*.js", "use": "@vercel/node", "config": { "includeFiles": ["world-data.js", "lib/**"] } }
@@ -27,6 +29,8 @@
     { "src": "/event/([^/]+)(?:/[^/]*)?", "dest": "/api/pages.js?t=event&id=$1" },
     { "src": "/guides", "dest": "/api/pages.js?t=guides" },
     { "src": "/guides/([^/]+)", "dest": "/api/pages.js?t=guide&slug=$1" },
+    { "src": "/el-nino", "dest": "/api/pages.js?t=enso" },
+    { "src": "/api/enso", "dest": "/api/pages.js?t=ensodata" },
     { "src": "/api/fetch", "dest": "/api/fetch.js" },
     { "src": "/contact", "dest": "contact.html" },
     { "src": "/about", "dest": "about.html" },
