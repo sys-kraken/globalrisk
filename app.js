@@ -160,8 +160,10 @@ const LABEL_SET = new Set(['USA','CAN','BRA','ARG','RUS','CHN','IND','AUS','ZAF'
 // NASA "Blue Marble" equirectangular basemap (public domain). Maps lon/lat
 // linearly, so it lines up exactly with the SVG projection, markers and labels.
 // Served by GIBS with open CORS, so the canvas can read it without a proxy.
-const SAT_URL = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap'
-  + '&FORMAT=image/jpeg&SRS=EPSG:4326&STYLES=&WIDTH=2048&HEIGHT=1024&BBOX=-180,-90,180,90&LAYERS=BlueMarble_NextGeneration';
+const SAT_BASE = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap'
+  + '&FORMAT=image/jpeg&SRS=EPSG:4326&STYLES=&BBOX=-180,-90,180,90&LAYERS=BlueMarble_NextGeneration';
+const SAT_URL = SAT_BASE + '&WIDTH=2048&HEIGHT=1024';
+const SAT_URL_HD = SAT_BASE + '&WIDTH=4096&HEIGHT=2048';   // about 700 KB, fetched once the globe is already up
 
 const STOPWORDS = new Set(('the a an and or of to in on for with from at by as is are was were be been will '
   + 'says said after over amid into new news world could would about more than that this his her its their '
@@ -820,6 +822,7 @@ function loadTexture() {
       const id = cx2.getImageData(0, 0, c.width, c.height);
       texData = id.data; texW = c.width; texH = c.height;
       markGlobeDirty();
+      loadSharperTexture();
     } catch (err) { console.warn('globe texture unavailable:', err.message); }
     texLoading = false;
     syncSatCanvas();
@@ -831,18 +834,140 @@ function loadTexture() {
   };
   im.src = SAT_URL;
 }
+// Only where the GPU paints the sphere and the screen is big enough to show the
+// extra detail. On failure the globe just keeps the image it already has.
+let texSharpTried = false;
+function loadSharperTexture() {
+  if (texSharpTried || window.innerWidth < 700) return;
+  const gl = sphereGL();
+  if (!gl || gl.ctx.getParameter(gl.ctx.MAX_TEXTURE_SIZE) < 4096) return;
+  texSharpTried = true;
+  const im = new Image();
+  im.crossOrigin = 'anonymous';
+  im.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = im.naturalWidth; c.height = im.naturalHeight;
+    const cx2 = c.getContext('2d');
+    cx2.drawImage(im, 0, 0);
+    texData = cx2.getImageData(0, 0, c.width, c.height).data;
+    texW = c.width; texH = c.height;
+    markGlobeDirty(); scheduleSettle();
+  };
+  im.src = SAT_URL_HD;
+}
 function syncSatCanvas() {
   if (gCanvas) gCanvas.style.display =
     (state.globe.on && state.satOn && (texData || globeTileZoom >= TILE_MIN_Z)) ? 'block' : 'none';
 }
 
+/* The GPU runs the same inverse projection as the fallback in paintSphere, fast
+   enough to stay at full resolution while the globe turns. One hidden WebGL canvas
+   serves every sphere: each result is copied onto its 2D canvas, so tiles and the
+   Niño boxes keep drawing on top as they always have. */
+const SPHERE_FS = `#version 300 es
+precision highp float;
+uniform sampler2D tex;
+uniform vec2 size;
+uniform float R, lat0, lonFrac;
+out vec4 color;
+void main() {
+  vec2 p = (gl_FragCoord.xy - size * 0.5) / R;
+  float r2 = dot(p, p);
+  float edge = clamp((1.0 - sqrt(r2)) * R + 0.5, 0.0, 1.0);   // antialiased limb
+  float c = sqrt(max(0.0, 1.0 - r2));
+  float lat = asin(clamp(p.y * cos(lat0) + c * sin(lat0), -1.0, 1.0));
+  float lam = atan(p.x, c * cos(lat0) - p.y * sin(lat0));
+  float u = lam / 6.28318530718 + lonFrac;
+  // Two copies of u that wrap in different places: using whichever is continuous
+  // here stops the mipmap choice drawing a line down the antimeridian.
+  float ua = fract(u), ub = fract(u + 0.5) - 0.5;
+  float uu = fwidth(ua) <= fwidth(ub) ? ua : ub;
+  vec4 t = texture(tex, vec2(uu, 0.5 - lat / 3.14159265359), -0.5);
+  color = vec4(t.rgb * (0.6 + 0.4 * c), t.a) * edge;   // limb darkening
+}`;
+let sphereGLState;   // undefined = not tried yet, null = use the fallback
+function sphereGL() {
+  if (sphereGLState !== undefined) return sphereGLState;
+  sphereGLState = null;
+  const cv = document.createElement('canvas');
+  // A software renderer would be slower than the fallback, so refuse it.
+  const gl = cv.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, failIfMajorPerformanceCaveat: true });
+  if (!gl) return null;
+  const shader = (type, src) => {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    return sh;
+  };
+  const prog = gl.createProgram();
+  // A triangle covering the whole viewport; the fragment shader does the rest.
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, `#version 300 es
+void main() { gl_Position = vec4(vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0, 0.0, 1.0); }`));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, SPHERE_FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.warn('globe shader failed, using the slower painter:', gl.getProgramInfoLog(prog));
+    return null;
+  }
+  gl.useProgram(prog);
+  const uni = {};
+  for (const n of ['size', 'R', 'lat0', 'lonFrac']) uni[n] = gl.getUniformLocation(prog, n);
+  sphereGLState = { ctx: gl, cv, uni, aniso: gl.getExtension('EXT_texture_filter_anisotropic'), slots: new Map() };
+  cv.addEventListener('webglcontextlost', () => { sphereGLState = null; markGlobeDirty(); scheduleSettle(); });
+  return sphereGLState;
+}
+// Each layer keeps one texture, replaced when its image changes.
+function bindSphereTexture(gl, slot, data, w, h) {
+  const g = gl.ctx;
+  let t = gl.slots.get(slot);
+  if (t && t.data === data) { g.bindTexture(g.TEXTURE_2D, t.tex); return; }
+  if (t) g.deleteTexture(t.tex);
+  t = { data, tex: g.createTexture() };
+  gl.slots.set(slot, t);
+  g.bindTexture(g.TEXTURE_2D, t.tex);
+  // Premultiplied, or the black behind the overlay's transparent land bleeds into its coasts.
+  g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  g.texImage2D(g.TEXTURE_2D, 0, g.RGBA8, w, h, 0, g.RGBA, g.UNSIGNED_BYTE, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  g.generateMipmap(g.TEXTURE_2D);
+  g.texParameteri(g.TEXTURE_2D, g.TEXTURE_MIN_FILTER, g.LINEAR_MIPMAP_LINEAR);
+  g.texParameteri(g.TEXTURE_2D, g.TEXTURE_MAG_FILTER, g.LINEAR);
+  g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_S, g.REPEAT);
+  g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_T, g.CLAMP_TO_EDGE);
+  if (gl.aniso) g.texParameterf(g.TEXTURE_2D, gl.aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, g.getParameter(gl.aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+}
+function paintSphereGL(gl, canvas, rect, td, tw, th, slot) {
+  const q = dprCap();
+  const cw = Math.max(2, Math.round(rect.width * q)), ch = Math.max(2, Math.round(rect.height * q));
+  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+  if (gl.cv.width !== cw || gl.cv.height !== ch) { gl.cv.width = cw; gl.cv.height = ch; }
+  const g = gl.ctx, st = state.globe;
+  g.viewport(0, 0, cw, ch);
+  g.clearColor(0, 0, 0, 0);
+  g.clear(g.COLOR_BUFFER_BIT);
+  bindSphereTexture(gl, slot, td, tw, th);
+  g.uniform2f(gl.uni.size, cw, ch);
+  g.uniform1f(gl.uni.R, globeR() * Math.min(rect.width / W, rect.height / H) * q);
+  g.uniform1f(gl.uni.lat0, st.lat * RAD);
+  g.uniform1f(gl.uni.lonFrac, (st.lon + 180) / 360);
+  g.drawArrays(g.TRIANGLES, 0, 3);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'copy';
+  ctx.drawImage(gl.cv, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  return true;
+}
+
 // Inverse orthographic per pixel: screen → sphere → lon/lat → texture.
 // `tex` defaults to the Blue Marble; overlays pass their own and keep their alpha.
+// `quality` only applies to this CPU fallback, which can't hold full size while moving.
 function paintSphere(canvas, quality, tex) {
   const td = tex ? tex.data : texData, tw = tex ? tex.w : texW, th = tex ? tex.h : texH;
   if (!td || !canvas) return false;
   const rect = stage.getBoundingClientRect();
   if (!rect.width) return false;
+  const gl = sphereGL();
+  if (gl) return paintSphereGL(gl, canvas, rect, td, tw, th, tex ? 'overlay' : 'base');
   const q = quality * Math.min(window.devicePixelRatio || 1, 1.5);
   const cw = Math.max(2, Math.round(rect.width * q));
   const ch = Math.max(2, Math.round(rect.height * q));
