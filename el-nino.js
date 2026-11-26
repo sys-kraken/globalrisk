@@ -288,7 +288,7 @@
 
   function draw() {
     ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
-    ctx.fillStyle = '#12161c';
+    ctx.fillStyle = '#0a0a0a';
     ctx.fillRect(0, 0, view.w, view.h);
     drawDataLayer();
     if (date) drawCoastlines(); // after the data, so outlines never hold up the imagery

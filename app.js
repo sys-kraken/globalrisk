@@ -3029,7 +3029,7 @@ function drawFlightLeg(ctx, dpr, toScreen) {
   const pts = greatCircle(r.from, r.to, 96);
   ctx.save();
   ctx.lineWidth = 1.6 * dpr;
-  ctx.strokeStyle = 'rgba(56,225,255,0.75)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
   ctx.setLineDash([6 * dpr, 5 * dpr]);
   ctx.beginPath();
   let pen = false;
@@ -3089,7 +3089,7 @@ function flightTip(f) {
       ? 'On the ground' + (f.spd > 1 ? ' · taxiing ' + ktOf(f.spd) + ' kt' : ' · stationary')
       : altLabel(f.alt) + ' · ' + ktOf(f.spd) + ' kt · ' + Math.round(f.trk) + '°') + '</div>'
     + (parked ? '' : '<div class="tt-meta">' + climb + (Math.abs(f.vr) > 1.5 ? ' ' + Math.abs(Math.round(f.vr * 196.85)) + ' ft/min' : '') + '</div>')
-    + '<span class="tt-sev" style="background:rgba(56,225,255,0.13);color:var(--cyan);border:1px solid rgba(56,225,255,0.4)">'
+    + '<span class="tt-sev" style="background:rgba(255,255,255,0.13);color:var(--cyan);border:1px solid rgba(255,255,255,0.4)">'
     + (flightFollow && flightFollow.id === f.id ? 'Following — click to release' : 'Click to follow') + '</span>';
 }
 function followFlight(f) {
