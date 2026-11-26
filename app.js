@@ -181,7 +181,6 @@ const state = {
   view: { x:0, y:0, w:W, h:H },
   globe: { on:true, lon:121, lat:13, scale:1, auto:true },   // starts centred on PH
   satOn: true,
-  mapStyle: 'satellite',         // 'satellite' (Esri imagery) or 'streets' (CARTO dark)
   markerEls: [],
   fires: [],
   fireEls: [],
@@ -364,6 +363,19 @@ function buildMap() {
   ensoBoxes.setAttribute('id', 'enso-boxes');
   svg.appendChild(ensoBoxes);
 
+  // Weather layer on the flat map (see WEATHER LAYER below): live canvases
+  // inside the SVG, so they pan and zoom with the map and sit under the markers.
+  const wx = document.createElementNS(SVGNS, 'foreignObject');
+  wx.setAttribute('id', 'wx-flat');
+  wx.setAttribute('x', 0); wx.setAttribute('y', 0);
+  wx.setAttribute('width', W); wx.setAttribute('height', H);
+  wxFlatField = document.createElement('canvas');
+  wxFlatField.width = WX_TW; wxFlatField.height = WX_TH;
+  wxFlatTrail = document.createElement('canvas');
+  wxFlatTrail.width = 1800; wxFlatTrail.height = 900;
+  wx.append(wxFlatField, wxFlatTrail);
+  svg.appendChild(wx);
+
   // ocean graticule (meridians / parallels)
   const grat = document.createElementNS(SVGNS, 'g');
   grat.setAttribute('class', 'graticule');
@@ -475,7 +487,9 @@ function pointerReadout(e) {
   const digits = !state.globe.on ? 1 : globeTileZoom >= 12 ? 4 : globeTileZoom >= 8 ? 3 : globeTileZoom >= 5 ? 2 : 1;
   const coords = Math.abs(q.lat).toFixed(digits) + '°' + (q.lat >= 0 ? 'N' : 'S') + ', ' + Math.abs(q.lon).toFixed(digits) + '°' + (q.lon >= 0 ? 'E' : 'W');
   const sst = ensoValueAt(q.lon, q.lat);
-  return '<div class="tt-coords">' + (sst ? '<strong>' + sst + '</strong> vs usual · ' : '') + coords + '</div>';
+  const wxv = wxValueAt(q.lon, q.lat);
+  return '<div class="tt-coords">' + (wxv ? '<strong>' + wxv + '</strong> · ' : '')
+    + (sst ? '<strong>' + sst + '</strong> vs usual · ' : '') + coords + '</div>';
 }
 function ensoValueAt(lon, lat) {
   if (!ensoOn || !ensoTex || (state.globe.on && globeTileZoom >= TILE_FLAT_Z)) return null;
@@ -616,6 +630,7 @@ stage.addEventListener('click', closeEventDetail);             // clicking empty
 const GX = 500, GY = 250, RAD = Math.PI / 180;
 const gEls = {};
 let ensoCanvas = null, ensoOn = false, ensoTex = null, ensoLoading = false, ensoInfo = null;
+let wxCanvas = null, wxOn = false, wxLoading = false, wxData = null, wxMode = 'satellite', wxPoll = null;
 let gCanvas = null, baseCanvas = null, gFeatures = [], gDirty = true, mapDragging = false, settleT = 0;
 let texData = null, texW = 0, texH = 0, texLoading = false;
 let satCanvas = null, satData = [], orbitsOn = false, orbitsLoading = false, satLastProp = 0;
@@ -705,6 +720,13 @@ function buildGlobe() {
   ensoCanvas = document.createElement('canvas');
   ensoCanvas.className = 'globe-canvas enso-canvas';
   stage.insertBefore(ensoCanvas, svg);   // over the imagery, under outlines and markers
+
+  wxCanvas = document.createElement('canvas');
+  wxCanvas.className = 'globe-canvas wx-canvas';
+  stage.insertBefore(wxCanvas, svg);     // over El Niño, still under outlines and markers
+  wxTrail = document.createElement('canvas');
+  wxTrail.className = 'globe-canvas wx-trail';
+  stage.insertBefore(wxTrail, svg);      // wind streamlines over the wind colours
 
   satCanvas = document.createElement('canvas');
   satCanvas.className = 'sat-canvas';
@@ -917,12 +939,32 @@ void main() { gl_Position = vec4(vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) *
   return sphereGLState;
 }
 // Each layer keeps one texture, replaced when its image changes.
-function bindSphereTexture(gl, slot, data, w, h) {
+function bindSphereTexture(gl, slot, data, w, h, ver) {
   const g = gl.ctx;
   let t = gl.slots.get(slot);
-  if (t && t.data === data) { g.bindTexture(g.TEXTURE_2D, t.tex); return; }
+  if (t) { gl.slots.delete(slot); gl.slots.set(slot, t); }          // touch: most recent
+  // Weather frames each keep their own texture; cap how many stay on the GPU.
+  if (!t && slot.startsWith('wx:')) {
+    let n = 0;
+    for (const k of gl.slots.keys()) if (k.startsWith('wx:')) n++;
+    for (const [k, old] of gl.slots) {
+      if (n < 24) break;
+      if (!k.startsWith('wx:')) continue;
+      g.deleteTexture(old.tex); gl.slots.delete(k); n--;
+    }
+  }
+  if (t && t.data === data && t.ver === ver) { g.bindTexture(g.TEXTURE_2D, t.tex); return; }
+  if (t && t.data === data && t.w === w && t.h === h) {
+    // Same buffer, new contents (an animated layer): refill the texture we have.
+    t.ver = ver;
+    g.bindTexture(g.TEXTURE_2D, t.tex);
+    g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    g.texSubImage2D(g.TEXTURE_2D, 0, 0, 0, w, h, g.RGBA, g.UNSIGNED_BYTE, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    g.generateMipmap(g.TEXTURE_2D);
+    return;
+  }
   if (t) g.deleteTexture(t.tex);
-  t = { data, tex: g.createTexture() };
+  t = { data, ver, w, h, tex: g.createTexture() };
   gl.slots.set(slot, t);
   g.bindTexture(g.TEXTURE_2D, t.tex);
   // Premultiplied, or the black behind the overlay's transparent land bleeds into its coasts.
@@ -935,7 +977,9 @@ function bindSphereTexture(gl, slot, data, w, h) {
   g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_T, g.CLAMP_TO_EDGE);
   if (gl.aniso) g.texParameterf(g.TEXTURE_2D, gl.aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, g.getParameter(gl.aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
 }
-function paintSphereGL(gl, canvas, rect, td, tw, th, slot) {
+// `blend` (0–1): lay this texture over what the canvas already holds at that
+// opacity, instead of replacing it — a cross-fade between two frames.
+function paintSphereGL(gl, canvas, rect, td, tw, th, slot, ver, blend) {
   const q = dprCap();
   const cw = Math.max(2, Math.round(rect.width * q)), ch = Math.max(2, Math.round(rect.height * q));
   if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
@@ -944,7 +988,7 @@ function paintSphereGL(gl, canvas, rect, td, tw, th, slot) {
   g.viewport(0, 0, cw, ch);
   g.clearColor(0, 0, 0, 0);
   g.clear(g.COLOR_BUFFER_BIT);
-  bindSphereTexture(gl, slot, td, tw, th);
+  bindSphereTexture(gl, slot, td, tw, th, ver);
   g.uniform2f(gl.uni.size, cw, ch);
   g.uniform1f(gl.uni.R, globeR() * Math.min(rect.width / W, rect.height / H) * q);
   g.uniform1f(gl.uni.lat0, st.lat * RAD);
@@ -952,22 +996,29 @@ function paintSphereGL(gl, canvas, rect, td, tw, th, slot) {
   g.drawArrays(g.TRIANGLES, 0, 3);
   const ctx = canvas.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = 'copy';
-  ctx.drawImage(gl.cv, 0, 0);
-  ctx.globalCompositeOperation = 'source-over';
+  if (blend === undefined) {
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(gl.cv, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+  } else {
+    ctx.globalAlpha = blend;
+    ctx.drawImage(gl.cv, 0, 0);
+    ctx.globalAlpha = 1;
+  }
   return true;
 }
 
 // Inverse orthographic per pixel: screen → sphere → lon/lat → texture.
 // `tex` defaults to the Blue Marble; overlays pass their own and keep their alpha.
 // `quality` only applies to this CPU fallback, which can't hold full size while moving.
-function paintSphere(canvas, quality, tex) {
+function paintSphere(canvas, quality, tex, slot, blend) {
   const td = tex ? tex.data : texData, tw = tex ? tex.w : texW, th = tex ? tex.h : texH;
   if (!td || !canvas) return false;
   const rect = stage.getBoundingClientRect();
   if (!rect.width) return false;
   const gl = sphereGL();
-  if (gl) return paintSphereGL(gl, canvas, rect, td, tw, th, tex ? 'overlay' : 'base');
+  if (gl) return paintSphereGL(gl, canvas, rect, td, tw, th, tex ? (slot || 'overlay') : 'base', tex && tex.ver, blend);
+  if (blend !== undefined) return true;          // the slow painter skips cross-fades
   const q = quality * Math.min(window.devicePixelRatio || 1, 1.5);
   const cw = Math.max(2, Math.round(rect.width * q));
   const ch = Math.max(2, Math.round(rect.height * q));
@@ -1011,6 +1062,7 @@ function scheduleSettle() {
   settleT = setTimeout(() => {
     if (state.globe.on && state.satOn) drawGlobeImagery(false);
     drawEnso(false);
+    drawWx(false);
   }, 240);
 }
 
@@ -1037,14 +1089,9 @@ const TILE_SOURCES = {
     id: 'satellite', max: 19,
     credit: 'Imagery © Esri · Maxar · Earthstar Geographics',
     url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`
-  },
-  streets: {
-    id: 'streets', max: 19,
-    credit: '© OpenStreetMap contributors · © CARTO',
-    url: (z, x, y) => `https://${'abc'[(x + y) % 3]}.basemaps.cartocdn.com/dark_all/${z}/${x}/${y}.png`
   }
 };
-const activeTileSource = () => TILE_SOURCES[state.mapStyle] || TILE_SOURCES.satellite;
+const activeTileSource = () => TILE_SOURCES.satellite;
 
 let globeTileZoom = 0, globeDeep = false, gratShown = true, lastScaleTxt = '';
 
@@ -1187,10 +1234,13 @@ function visibleTiles(z, met) {
 }
 
 /* ---- paint the tiles onto the sphere ---------------------------------- */
-function drawTiles(z, ctx, cw, ch, met) {
+// `src` defaults to the base map; overlays pass their own. `clearUnder` wipes
+// each tile's footprint first, so a sharp overlay tile replaces the blurry
+// whole-world picture beneath it instead of stacking on top of it.
+function drawTiles(z, ctx, cw, ch, met, src = activeTileSource().id, clearUnder = false) {
   const range = visibleTiles(z, met);
   if (!range) return;
-  const src = activeTileSource().id, n = range.n, g = state.globe;
+  const n = range.n, g = state.globe;
   const scale = met.s * (cw / met.w);            // CSS units -> canvas pixels
   const R = globeR() * scale, cx = cw / 2, cy = ch / 2;
   const cosp0 = Math.cos(g.lat * RAD), sinp0 = Math.sin(g.lat * RAD);
@@ -1231,6 +1281,7 @@ function drawTiles(z, ctx, cw, ch, met) {
           // Stretch the destination a hair so neighbouring quads leave no seam.
           const ov = 0.7 / Math.max(Math.hypot(a, b), 1e-6);
           ctx.setTransform(a, b, c, d, P00.x, P00.y);
+          if (clearUnder) ctx.clearRect(0, 0, sw + ov, sh + ov);
           ctx.drawImage(got.img, got.sx + i * sw, got.sy + j * sh, sw, sh, 0, 0, sw + ov, sh + ov);
         }
       }
@@ -1419,6 +1470,984 @@ function buildEnsoFlatBoxes() {
     t.setAttribute('y', y + (r.id === 'nino12' ? 9 : r.id === 'nino34' ? -9 : -2));
     t.textContent = ensoLabel(r);
     g.appendChild(t);
+  }
+}
+
+/* ==========================================================================
+   WEATHER LAYER — a Zoom Earth–style weather map with a timeline.
+
+   Live maps (real imagery, the recent past, played as a loop):
+     satellite  EUMETSAT's geostationary ring — every weather satellite in
+                orbit stitched into one infrared picture of the planet, 3-hourly
+     rain       NASA IMERG precipitation estimate, hourly, ~6 h behind
+   Forecast maps (NOAA GFS via /api/weather: wind at 0.5°, the rest at 1°,
+   3-hourly to +48 h, smoothly interpolated in between, loaded a step at a
+   time): wind (with streaming particles and advisory-based storm cores),
+   temperature, humidity, pressure.
+
+   Whatever the mode, the picture is one or two equirectangular RGBA frames
+   (wxShow), built in a worker: painted onto the sphere through the shared
+   sphere painter on the globe, and drawn into canvases inside the SVG on the
+   flat map.
+   ========================================================================== */
+const WX_TW = 1024, WX_TH = 512;         // forecast field texture (~0.35° a pixel)
+const WX_PART_GLOBE = 0.15;              // particle °/s per km/h at the reference radius (a time-lapse)
+const WX_PART_FLAT = 0.17;               // particle °/s per km/h on the flat map
+const WX_FIELD_MS = 66;                  // forecast field refresh while playing (~15 fps)
+const WX_FORECAST_SPEED = 3600e3;        // forecast playback: 1 hour of weather per second
+const WX_FRAME_MS = 450;                 // imagery playback: one frame every 0.45 s
+
+const WX_IMAGERY = {
+  satellite: {
+    // The whole-world picture only shows zoomed right out (sharp tiles take over
+    // from z3), where the planet is ~1000 px across: 1024 wide is enough and
+    // uploads to the GPU four times faster than 2048.
+    frames: 8, stepMs: 3 * 3600e3, slotMs: 3 * 3600e3, lagMs: 0, tries: 4, minBytes: 20000,
+    url: (iso) => 'https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.1.1&request=GetMap'
+      + '&layers=mumi:worldcloudmap_ir108&styles=&srs=EPSG:4326&bbox=-180,-90,180,90&width=1024&height=512'
+      + '&format=image/jpeg&time=' + iso,
+    // Zoomed in: 256 px Web-Mercator tiles of the same picture, sharp to ~z8.
+    // No-data (the poles) comes back transparent in PNG.
+    tile: (bb, iso) => 'https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.1.1&request=GetMap'
+      + '&layers=mumi:worldcloudmap_ir108&styles=&srs=EPSG:3857&bbox=' + bb + '&width=256&height=256'
+      + '&format=image/png&transparent=true&time=' + iso,
+    tileMax: 8,
+    status: 'EUMETSAT geostationary infrared · every 3 h',
+  },
+  rain: {
+    frames: 8, stepMs: 3600e3, slotMs: 1800e3, lagMs: 4 * 3600e3, tries: 10, minBytes: 9000,
+    url: (iso) => 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap'
+      + '&FORMAT=image/png&TRANSPARENT=TRUE&SRS=EPSG:4326&STYLES=&WIDTH=1024&HEIGHT=512&BBOX=-180,-90,180,90'
+      + '&LAYERS=IMERG_Precipitation_Rate_30min&TIME=' + iso,
+    tile: (bb, iso) => 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap'
+      + '&FORMAT=image/png&TRANSPARENT=TRUE&SRS=EPSG:3857&STYLES=&WIDTH=256&HEIGHT=256&BBOX=' + bb
+      + '&LAYERS=IMERG_Precipitation_Rate_30min&TIME=' + iso,
+    tileMax: 6,                     // IMERG is ~10 km a pixel
+    status: 'NASA IMERG satellite estimate · ~6 h behind',
+  },
+};
+
+const WX_MODES = {
+  satellite: {
+    label: 'Satellite', title: 'Satellite · infrared', live: true,
+    ticks: ['warm ground', 'cold cloud tops'], bar: 'linear-gradient(90deg, #161616, #6e6e6e, #ffffff)',
+  },
+  rain: {
+    label: 'Rain', title: 'Precipitation · blue is snow', live: true,
+    ticks: ['light', 'moderate', 'heavy'], bar: 'linear-gradient(90deg, #a8e88a, #2ea84a 30%, #f4e04d 55%, #f39a2b 75%, #e3262a)',
+  },
+  wind: {
+    label: 'Wind', title: 'Wind at 10 m', key: 'ws', min: 0, max: 120, alpha: 0.6,
+    ticks: ['0', '40', '80', '120+ km/h'],
+    ramp: [[0, [36, 64, 112]], [0.1, [40, 116, 160]], [0.22, [52, 162, 120]], [0.38, [206, 196, 72]], [0.56, [226, 124, 52]], [0.78, [196, 44, 72]], [1, [150, 44, 172]]],
+  },
+  temp: {
+    label: 'Temp', title: 'Temperature at 2 m', key: 't', min: -40, max: 45, alpha: 0.62,
+    ticks: ['−40°', '0°', '20°', '45°C'],
+    ramp: [[0, [120, 40, 160]], [0.2, [70, 90, 210]], [0.4, [70, 170, 230]], [0.47, [150, 220, 230]], [0.6, [110, 200, 110]], [0.72, [235, 220, 80]], [0.84, [240, 140, 50]], [1, [190, 30, 40]]],
+  },
+  humidity: {
+    label: 'Humidity', title: 'Relative humidity', key: 'rh', min: 0, max: 100, alpha: 0.62,
+    ticks: ['0%', '50%', '100%'],
+    ramp: [[0, [214, 128, 52]], [0.3, [236, 196, 104]], [0.5, [168, 220, 150]], [0.7, [56, 186, 170]], [0.85, [40, 128, 204]], [1, [52, 66, 190]]],
+  },
+  pressure: {
+    label: 'Pressure', title: 'Sea-level pressure', key: 'p', min: 960, max: 1050, alpha: 0.58,
+    ticks: ['960', '1013', '1050 hPa'],
+    ramp: [[0, [110, 40, 150]], [0.25, [60, 100, 200]], [0.45, [120, 190, 220]], [0.59, [235, 235, 225]], [0.75, [240, 190, 90]], [1, [200, 50, 50]]],
+  },
+};
+const wxIsLive = (m) => !!WX_MODES[m].live;
+// One tile source per imagery frame, registered with the base map's tile cache.
+function wxMercBox(z, x, y) {
+  const R = 20037508.342789244, s = 2 * R / 2 ** z;
+  return [-R + x * s, R - (y + 1) * s, -R + (x + 1) * s, R - y * s].map((v) => v.toFixed(2)).join(',');
+}
+function wxTileSource(mode, t) {
+  const id = 'wx-' + mode + '-' + t, src = WX_IMAGERY[mode];
+  if (!TILE_SOURCES[id]) TILE_SOURCES[id] = { id, max: src.tileMax, url: (z, x, y) => src.tile(wxMercBox(z, x, y), wxIso(t)) };
+  return id;
+}
+// Live imagery only resolves to ~z8, so it bows out past zoom 11; the forecast
+// layers stay at every zoom, like Zoom Earth's.
+const wxTooDeep = () => state.globe.on && wxIsLive(wxMode) && globeTileZoom > 11;
+
+let wxTrail = null, wxFlatField = null, wxFlatTrail = null;
+let wxRaf = 0, wxLastT = 0, wxViewSig = '', wxLastField = 0, wxLastFrame = 0;
+let wxParts = null;
+let wxPlaying = false;
+let wxT = 0;                       // forecast time being shown (ms)
+let wxFrameIdx = 0;                // imagery frame being shown
+const wxImg = {};                  // mode → { frames: [{ t, img }], loading }
+
+function wxRamp(ramp, t) {
+  t = clamp(t, 0, 1);
+  for (let k = 1; k < ramp.length; k++) {
+    if (t <= ramp[k][0]) {
+      const [t0, c0] = ramp[k - 1], [t1, c1] = ramp[k];
+      const f = (t - t0) / ((t1 - t0) || 1);
+      return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f];
+    }
+  }
+  return ramp[ramp.length - 1][1];
+}
+const wxBar = (ramp) => 'linear-gradient(90deg,' + ramp.map(([t, c]) => 'rgb(' + c.map(Math.round).join(',') + ') ' + (t * 100) + '%').join(',') + ')';
+
+/* ---- forecast data: NOAA GFS via /api/weather -------------------------- */
+// Grids come row-major from 90°N, 0°E: wind at 0.5°, the rest at 1°.
+const WX_FINE = { ni: 720, nj: 361, d: 0.5 }, WX_COARSE = { ni: 360, nj: 181, d: 1 };
+const WX_STORM_RMAX = 40;          // km: radius of maximum wind assumed for storm cores
+
+// Bilinear sample of a global grid, wrapping in longitude.
+function wxGrid(arr, g, lon, lat) {
+  const x = (((lon % 360) + 360) % 360) / g.d;
+  const y = clamp((90 - lat) / g.d, 0, g.nj - 1);
+  const xf = Math.floor(x), x0 = xf % g.ni, x1 = (x0 + 1) % g.ni, fx = x - xf;
+  const y0 = Math.floor(y), y1 = Math.min(g.nj - 1, y0 + 1), fy = y - y0;
+  const a = arr[y0 * g.ni + x0], b = arr[y0 * g.ni + x1], c = arr[y1 * g.ni + x0], d = arr[y1 * g.ni + x1];
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+// One decoded step: u/v in km/h, temperature °C, humidity %, pressure hPa.
+const wxStepUV = (S, lon, lat) => [wxGrid(S.u, WX_FINE, lon, lat) * 1.8, wxGrid(S.v, WX_FINE, lon, lat) * 1.8];
+function wxStepVal(S, key, lon, lat) {
+  if (key === 't') return wxGrid(S.t, WX_COARSE, lon, lat);
+  if (key === 'rh') return wxGrid(S.rh, WX_COARSE, lon, lat);
+  return wxGrid(S.p, WX_COARSE, lon, lat) + 900;
+}
+
+// Which two loaded-or-loadable steps bracket a time, and how far between them.
+function wxStepAt(t) {
+  const st = wxData.steps, n = st.length, s = t / 1000;
+  let a = wxData.first;
+  if (s <= st[a].t) return [a, a, 0];
+  if (s >= st[n - 1].t) return [n - 1, n - 1, 0];
+  while (a < n - 2 && st[a + 1].t <= s) a++;
+  return [a, a + 1, (s - st[a].t) / (st[a + 1].t - st[a].t)];
+}
+
+// Fetch one step's grids (once). Resolves to the decoded step or null.
+function wxEnsureStep(i) {
+  const D = wxData;
+  if (!D || i < 0 || i >= D.steps.length) return Promise.resolve(null);
+  if (D.data[i]) return Promise.resolve(D.data[i]);
+  if (D.pending[i]) return D.pending[i];
+  const run = D.run;
+  D.pending[i] = fetch('/api/weather?run=' + run + '&step=' + D.steps[i].step)
+    .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('HTTP ' + r.status))))
+    .then((buf) => {
+      const nw = WX_FINE.ni * WX_FINE.nj, nc = WX_COARSE.ni * WX_COARSE.nj;
+      if (buf.byteLength !== nw * 2 + nc * 3) throw new Error('unexpected step size');
+      const S = {
+        buf,
+        u: new Int8Array(buf, 0, nw), v: new Int8Array(buf, nw, nw),
+        t: new Int8Array(buf, nw * 2, nc), rh: new Uint8Array(buf, nw * 2 + nc, nc), p: new Uint8Array(buf, nw * 2 + nc * 2, nc),
+      };
+      if (wxData !== D) return null;          // a newer run replaced this one meanwhile
+      D.data[i] = S;
+      if (wxOn && !wxIsLive(wxMode)) { wxRender(); wxStart(); }
+      return S;
+    })
+    .catch((e) => { console.warn('Weather step unavailable:', e.message); D.pending[i] = null; return null; });
+  return D.pending[i];
+}
+
+// Storm cores. A global model at this resolution smears a tropical cyclone's
+// core: the winds at its centre come out at a fraction of what the advisory
+// reports. Within a few hundred km of each active storm the model wind is
+// blended into a standard storm profile (rising linearly to the reported
+// maximum at ~40 km, then decaying), turning anticlockwise in the north and
+// clockwise in the south with a slight inflow. Only near the present: the
+// advisory position is now, so the blend fades out 12 h either side.
+function wxStormAdjust(lon, lat, t, uv) {
+  if (!storms.length) return uv;
+  const hrs = Math.abs(t - Date.now()) / 3600e3;
+  const fade = clamp(1 - hrs / 12, 0, 1);
+  if (fade <= 0) return uv;
+  for (const s of storms) {
+    if (!s.center || !(s.wind > 0)) continue;
+    const clon = s.center[0], clat = s.center[1];
+    let dlon = lon - clon;
+    dlon -= 360 * Math.round(dlon / 360);
+    const dx = dlon * 111.32 * Math.cos(clat * RAD), dy = (lat - clat) * 110.57;
+    const r = Math.hypot(dx, dy);
+    if (r > 600) continue;
+    const Rm = WX_STORM_RMAX, rr = Math.max(r, 0.01);
+    const vt = r < Rm ? s.wind * r / Rm : s.wind * Math.pow(Rm / r, 0.55);
+    const turn = clat >= 0 ? 1 : -1;
+    const tx = -dy / rr * turn, ty = dx / rr * turn;
+    const vx = vt * (0.94 * tx - 0.34 * dx / rr), vy = vt * (0.94 * ty - 0.34 * dy / rr);
+    const w = (1 - wxSmooth(150, 600, r)) * fade;
+    uv = [uv[0] + (vx - uv[0]) * w, uv[1] + (vy - uv[1]) * w];
+  }
+  return uv;
+}
+const wxSmooth = (e0, e1, v) => { const t = clamp((v - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+const wxStormSig = () => storms.map((s) => s.name + s.wind + (s.center || []).join()).join('|');
+
+// Wind (km/h east, north) at a place and time, storm cores included.
+function wxUV(lon, lat, t = wxT) {
+  const [a, b, f] = wxStepAt(t);
+  const A = wxData.data[a];
+  if (!A) return null;
+  let uv = wxStepUV(A, lon, lat);
+  const B = f && wxData.data[b];
+  if (B) { const ub = wxStepUV(B, lon, lat); uv = [uv[0] + (ub[0] - uv[0]) * f, uv[1] + (ub[1] - uv[1]) * f]; }
+  return wxStormAdjust(lon, lat, t, uv);
+}
+function wxValue(key, lon, lat, t) {
+  const [a, b, f] = wxStepAt(t);
+  const A = wxData.data[a];
+  if (!A) return null;
+  let v = wxStepVal(A, key, lon, lat);
+  const B = f && wxData.data[b];
+  if (B) v += (wxStepVal(B, key, lon, lat) - v) * f;
+  return v;
+}
+
+// One forecast step of one mode, as colour. Built on first use and kept.
+
+/* ---- frames: everything per-pixel happens in a worker ------------------ */
+// Decoding a 2048 px satellite picture, or colouring a forecast step, costs
+// 100–300 ms of solid CPU: done on the page's own thread that is a frozen
+// page. A worker does it instead, built from the very same helpers used here
+// (so there is one copy of the maths), and hands back raw RGBA. Each finished
+// frame becomes its own GPU texture once, so playback just switches textures,
+// and the in-between hours of a forecast are a GPU cross-fade, not a loop.
+let wxWorker = null, wxJobId = 0;
+const wxJobs = new Map();
+
+function wxWorkerMain() {
+  const steps = new Map();
+  self.onmessage = async (e) => {
+    const m = e.data;
+    try {
+      if (m.type === 'image') {
+        const r = await fetch(m.url);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        if (blob.size < m.minBytes) throw new Error('not published yet');
+        const bmp = await createImageBitmap(blob);
+        const w = bmp.width, h = bmp.height, c = new OffscreenCanvas(w, h), x = c.getContext('2d', { willReadFrequently: true });
+        x.drawImage(bmp, 0, 0);
+        bmp.close();
+        const d = x.getImageData(0, 0, w, h).data;
+        if (m.mode === 'satellite') {
+          // Geostationary satellites see the poles only at a grazing angle, and
+          // EUMETSAT paints what none of them sees pure black, in boxy patches:
+          // drop the black and fade out between 68° and 78°, so the poles blend
+          // into the map instead of showing a hard-edged hole.
+          for (let y = 0; y < h; y++) {
+            const fade = 1 - wxSmooth(68, 78, Math.abs(90 - (y + 0.5) / h * 180));
+            for (let o = y * w * 4, end = o + w * 4; o < end; o += 4) {
+              const v = d[o];
+              d[o + 3] = (v <= 8 ? 0 : v < 22 ? (v - 8) / 14 : 1) * fade * 255;
+            }
+          }
+        }
+        self.postMessage({ id: m.id, w, h, buf: d.buffer }, [d.buffer]);
+      } else if (m.type === 'step') {
+        const nw = WX_FINE.ni * WX_FINE.nj, nc = WX_COARSE.ni * WX_COARSE.nj, b = m.buf;
+        steps.set(m.key, {
+          u: new Int8Array(b, 0, nw), v: new Int8Array(b, nw, nw),
+          t: new Int8Array(b, nw * 2, nc), rh: new Uint8Array(b, nw * 2 + nc, nc), p: new Uint8Array(b, nw * 2 + nc * 2, nc),
+        });
+        if (steps.size > 24) steps.delete(steps.keys().next().value);
+        self.postMessage({ id: m.id });
+      } else if (m.type === 'field') {
+        const S = steps.get(m.key);
+        if (!S) throw new Error('step not loaded');
+        storms = m.storms;
+        const TW = m.w, TH = m.h, span = m.max - m.min, out = new Uint8ClampedArray(TW * TH * 4);
+        for (let y = 0; y < TH; y++) {
+          const lat = 90 - (y + 0.5) / TH * 180;
+          for (let x = 0; x < TW; x++) {
+            const lon = -180 + (x + 0.5) / TW * 360;
+            let v;
+            if (m.mode === 'wind') { const uv = wxStormAdjust(lon, lat, m.when, wxStepUV(S, lon, lat)); v = Math.hypot(uv[0], uv[1]); }
+            else v = wxStepVal(S, m.field, lon, lat);
+            const t = (v - m.min) / span, c = wxRamp(m.ramp, t), o = (y * TW + x) * 4;
+            out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2];
+            out[o + 3] = (m.mode === 'wind' ? 0.42 + 0.3 * clamp(t * 2.5, 0, 1) : m.alpha) * 255;
+          }
+        }
+        self.postMessage({ id: m.id, w: TW, h: TH, buf: out.buffer }, [out.buffer]);
+      }
+    } catch (err) {
+      self.postMessage({ id: m.id, error: String((err && err.message) || err) });
+    }
+  };
+}
+
+function wxMakeWorker() {
+  const src = [
+    'const RAD = Math.PI / 180;',
+    'const clamp = ' + clamp + ';',
+    'const wxSmooth = ' + wxSmooth + ';',
+    'const WX_FINE = ' + JSON.stringify(WX_FINE) + ', WX_COARSE = ' + JSON.stringify(WX_COARSE) + ', WX_STORM_RMAX = ' + WX_STORM_RMAX + ';',
+    'let storms = [];',
+    String(wxGrid), String(wxRamp), String(wxStormAdjust), String(wxStepVal),
+    'const wxStepUV = ' + wxStepUV + ';',
+    '(' + wxWorkerMain + ')();',
+  ].join('\n');
+  const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+  w.onmessage = (e) => {
+    const job = wxJobs.get(e.data.id);
+    if (!job) return;
+    wxJobs.delete(e.data.id);
+    if (e.data.error) job.rej(new Error(e.data.error)); else job.res(e.data);
+  };
+  w.onerror = () => {
+    for (const job of wxJobs.values()) job.rej(new Error('weather worker failed'));
+    wxJobs.clear();
+    wxWorker = null;
+  };
+  return w;
+}
+function wxWorkerCall(msg, transfer) {
+  if (!wxWorker) wxWorker = wxMakeWorker();
+  return new Promise((res, rej) => {
+    const id = ++wxJobId;
+    wxJobs.set(id, { res, rej });
+    wxWorker.postMessage({ ...msg, id }, transfer || []);
+  });
+}
+
+// Finished frames by key. Each: { key, state: 'loading'|'ok'|'err', data, w, h, p }.
+const wxFrames = new Map();
+function wxFrame(key, make) {
+  let F = wxFrames.get(key);
+  if (F) { wxFrames.delete(key); wxFrames.set(key, F); return F; }        // touch: most recent
+  F = { key, state: 'loading', data: null, w: 0, h: 0 };
+  F.p = make().then((r) => {
+    F.data = new Uint8ClampedArray(r.buf); F.w = r.w; F.h = r.h; F.state = 'ok';
+    if (wxOn) wxRender();
+    return F;
+  }, (e) => { F.state = 'err'; wxFrames.delete(key); throw e; });
+  F.p.catch(() => {});
+  wxFrames.set(key, F);
+  // Keep memory bounded: drop the least recently used frames not on screen.
+  for (const [k, old] of wxFrames) {
+    if (wxFrames.size <= 40) break;
+    if (old.state === 'loading' || (wxShow && (wxShow.a === old || wxShow.b === old))) continue;
+    if (old.bmp) old.bmp.close();
+    wxFrames.delete(k);
+  }
+  return F;
+}
+const wxImageFrame = (mode, t) => {
+  const src = WX_IMAGERY[mode];
+  return wxFrame('wx:' + mode + ':' + t, () => wxWorkerCall({ type: 'image', mode, url: src.url(wxIso(t)), minBytes: src.minBytes }));
+};
+// A forecast step's grids, handed to the worker once per step.
+const wxStepSent = new Map();
+function wxStepToWorker(s) {
+  const key = wxData.run + ':' + s;
+  if (!wxStepSent.has(key)) {
+    const copy = wxData.data[s].buf.slice(0);
+    wxStepSent.set(key, wxWorkerCall({ type: 'step', key, buf: copy }, [copy]).catch((e) => { wxStepSent.delete(key); throw e; }));
+  }
+  return wxStepSent.get(key).then(() => key);
+}
+function wxFieldFor(mode, s) {
+  if (!wxData || s < 0 || s >= wxData.steps.length) return null;
+  if (!wxData.data[s]) { wxEnsureStep(s); return null; }
+  const m = WX_MODES[mode], when = wxData.steps[s].t * 1000;
+  const live = mode === 'wind' ? storms.filter((st) => st.center && st.wind > 0).map((st) => ({ center: st.center, wind: st.wind })) : [];
+  const key = 'wx:' + mode + ':' + wxData.run + ':' + s + (mode === 'wind' ? ':' + wxStormSig() : '');
+  return wxFrame(key, () => wxStepToWorker(s).then((stepKey) => wxWorkerCall({
+    type: 'field', key: stepKey, mode, field: m.key, w: WX_TW, h: WX_TH, when, storms: live,
+    ramp: m.ramp, min: m.min, max: m.max, alpha: m.alpha,
+  })));
+}
+
+/* ---- what is on screen ------------------------------------------------- */
+// { mode, a, b, f }: frame a, cross-faded towards b by f.
+let wxShow = null;
+function wxPick() {
+  if (wxIsLive(wxMode)) {
+    const fr = ((wxImg[wxMode] || {}).frames || [])[wxFrameIdx];
+    const F = fr && wxImageFrame(wxMode, fr.t);
+    if (F && F.state === 'ok') return { mode: wxMode, a: F, b: null, f: 0 };
+  } else if (wxData) {
+    const [a, b, f] = wxStepAt(wxT);
+    const A = wxFieldFor(wxMode, a);
+    const B = f >= 0.01 && a !== b ? wxFieldFor(wxMode, b) : null;
+    if (wxPlaying) wxFieldFor(wxMode, b + 1);          // stay a step ahead of playback
+    if (A && A.state === 'ok') return { mode: wxMode, a: A, b: B && B.state === 'ok' ? B : null, f };
+  }
+  // Still loading: keep the previous picture of this mode up rather than blank.
+  return wxShow && wxShow.mode === wxMode ? wxShow : null;
+}
+
+function wxRender() {
+  if (!wxOn) return;
+  wxShow = wxPick();
+  if (wxShow) { if (state.globe.on) drawWx(false); else wxFlatPaint(); }
+  syncWx();
+}
+
+const wxIso = (ms) => new Date(ms).toISOString().slice(0, 19) + 'Z';
+
+// Newest published frame first (walking back slot by slot until one exists),
+// then the older frames behind it. The newest shows as soon as it lands.
+async function wxLoadImagery(mode, refresh) {
+  const src = WX_IMAGERY[mode];
+  const set = wxImg[mode] || (wxImg[mode] = { frames: [], loading: false });
+  if (set.loading || (set.frames.length && !refresh)) return;
+  set.loading = true;
+  syncWx();
+  try {
+    let t = Math.floor((Date.now() - src.lagMs) / src.slotMs) * src.slotMs, latest = null;
+    for (let k = 0; k < src.tries && latest === null; k++, t -= src.slotMs) {
+      try { await wxImageFrame(mode, t).p; latest = t; } catch { /* not out yet */ }
+    }
+    if (latest === null) throw new Error('no recent imagery');
+    if (refresh && set.frames.length && set.frames[set.frames.length - 1].t === latest) return;
+    set.frames = [{ t: latest }];
+    if (wxMode === mode) { wxFrameIdx = 0; wxRender(); }
+    // Older frames load in the background; the loop grows as they arrive.
+    const older = [];
+    for (let k = 1; k < src.frames; k++) older.push(latest - k * src.stepMs);
+    const got = await Promise.all(older.map((ot) => wxImageFrame(mode, ot).p.then(() => ot, () => null)));
+    const showing = set.frames[wxFrameIdx];
+    const all = got.filter((x) => x !== null).concat(latest).sort((a, b) => a - b).map((ft) => ({ t: ft }));
+    set.frames = all;
+    if (wxMode === mode) {
+      const keep = wxPlaying && showing ? all.findIndex((x) => x.t === showing.t) : -1;
+      wxFrameIdx = keep >= 0 ? keep : all.length - 1;
+      wxRender();
+    }
+  } catch (e) {
+    console.warn('Weather imagery unavailable:', e.message);
+    if (wxMode === mode && !set.frames.length) toast((mode === 'rain' ? 'Rain' : 'Satellite') + ' imagery is unavailable right now', true);
+  } finally {
+    set.loading = false;
+    syncWx();
+  }
+}
+
+async function wxLoadForecast(refresh) {
+  if (wxLoading || (wxData && !refresh)) return;
+  wxLoading = true;
+  syncWx();
+  try {
+    const r = await fetch('/api/weather');
+    const j = r.ok ? await r.json() : null;
+    if (!j || !j.run || !j.steps) throw new Error((j && j.error) || 'HTTP ' + r.status);
+    if (!wxData || wxData.run !== j.run) {
+      // The timeline starts at the step nearest the present.
+      const now = Date.now() / 1000;
+      let first = 0;
+      while (first < j.steps.length - 2 && j.steps[first + 1].t <= now + 5400) first++;
+      wxData = { run: j.run, steps: j.steps, first, data: [], pending: [] };
+      wxT = clamp(wxT || Date.now(), j.steps[first].t * 1000, j.steps[j.steps.length - 1].t * 1000);
+      wxEnsureStep(wxStepAt(wxT)[0]);
+    }
+    wxRetries = 0;
+  } catch (e) {
+    console.warn('Weather forecast unavailable:', e.message);
+    if (!wxData) {
+      // A cold server's first upstream call can fail; try again shortly
+      // rather than waiting half an hour for the next poll.
+      wxRetries = (wxRetries || 0) + 1;
+      if (wxRetries <= 3) setTimeout(() => { if (wxOn && !wxData) wxLoadForecast(false); }, 15000 * wxRetries);
+      else if (!wxIsLive(wxMode)) toast('Weather forecast is unavailable right now', true);
+    }
+  }
+  wxLoading = false;
+  syncWx();
+}
+let wxRetries = 0;
+
+// Fetch whatever the current mode needs. The forecast also feeds the hover
+// readouts, so it loads in every mode.
+function loadWeather() {
+  wxLoadForecast(false);
+  if (wxIsLive(wxMode)) wxLoadImagery(wxMode, false);
+  wxStart();
+}
+function wxRefresh() {
+  wxLoadForecast(true);
+  if (wxIsLive(wxMode)) wxLoadImagery(wxMode, true);
+}
+
+/* ---- modes, timeline, chip -------------------------------------------- */
+function setWxMode(mode) {
+  if (mode === 'clouds') mode = 'satellite';      // the old name, from shared links
+  if (!WX_MODES[mode] || mode === wxMode) return;
+  wxMode = mode;
+  for (const b of document.querySelectorAll('#wx-chip [data-wx]')) {
+    const on = b.dataset.wx === mode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  wxClearTrails();
+  if (wxIsLive(mode)) {
+    const set = wxImg[mode];
+    wxFrameIdx = set && set.frames.length ? set.frames.length - 1 : 0;
+  }
+  if (wxOn) { loadWeather(); wxRender(); }
+  syncWx(); markGlobeDirty(); scheduleSettle();
+}
+
+// Timeline span and position for the current mode: [min, max, value, isLive].
+function wxTimeline() {
+  if (wxIsLive(wxMode)) {
+    const fr = (wxImg[wxMode] || {}).frames || [];
+    if (!fr.length) return null;
+    return { n: fr.length, idx: wxFrameIdx, t: fr[wxFrameIdx].t, first: fr[0].t, last: fr[fr.length - 1].t };
+  }
+  if (!wxData) return null;
+  const st = wxData.steps;
+  return { first: st[wxData.first].t * 1000, last: st[st.length - 1].t * 1000, t: wxT };
+}
+
+function wxFmtTime(ms) {
+  return new Date(ms).toLocaleString('en-US', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+}
+function wxRelTime(ms) {
+  const h = Math.round((ms - Date.now()) / 3600e3);
+  if (wxIsLive(wxMode)) {
+    const ago = Math.round((Date.now() - ms) / 3600e3);
+    return ago <= 0 ? 'latest' : ago + ' h ago';
+  }
+  return h <= 0 ? 'now' : '+' + h + ' h';
+}
+
+function syncWxTimeline() {
+  const bar = $('#wx-time');
+  const tl = wxOn ? wxTimeline() : null;
+  bar.hidden = !tl;
+  if (!tl) return;
+  const slider = $('#wx-slider');
+  if (tl.n) { slider.max = tl.n - 1; slider.step = 1; slider.value = tl.idx; }
+  else { slider.max = 1000; slider.step = 1; slider.value = Math.round((tl.t - tl.first) / ((tl.last - tl.first) || 1) * 1000); }
+  $('#wx-when').textContent = wxFmtTime(tl.t);
+  $('#wx-rel').textContent = wxRelTime(tl.t);
+  const play = $('#wx-play');
+  play.classList.toggle('playing', wxPlaying);
+  play.setAttribute('aria-label', wxPlaying ? 'Pause' : 'Play');
+  play.title = wxPlaying ? 'Pause' : 'Play';
+  const atNow = tl.n ? tl.idx === tl.n - 1 : Math.abs(tl.t - clamp(Date.now(), tl.first, tl.last)) < 30 * 60e3;
+  $('#wx-now').disabled = atNow && !wxPlaying;
+}
+
+function wxSeekSlider(v) {
+  const tl = wxTimeline();
+  if (!tl) return;
+  wxPlaying = false;
+  if (tl.n) wxFrameIdx = clamp(Math.round(v), 0, tl.n - 1);
+  else wxT = tl.first + (tl.last - tl.first) * v / 1000;
+  wxClearTrails();
+  wxRender();
+}
+function wxGoNow() {
+  wxPlaying = false;
+  const tl = wxTimeline();
+  if (tl && tl.n) wxFrameIdx = tl.n - 1;
+  else if (tl) wxT = clamp(Date.now(), tl.first, tl.last);
+  wxClearTrails();
+  wxRender();
+}
+function wxTogglePlay() {
+  wxPlaying = !wxPlaying;
+  // Start from the beginning when play is pressed at the end.
+  const tl = wxTimeline();
+  if (wxPlaying && tl) {
+    if (tl.n && tl.idx === tl.n - 1) wxFrameIdx = 0;
+    if (!tl.n && tl.t >= tl.last - 60e3) wxT = tl.first;
+    wxLastFrame = performance.now();
+    wxRender();
+  }
+  syncWxTimeline();
+  wxStart();
+}
+
+function syncWx() {
+  const ready = wxOn && !!wxShow && wxShow.mode === wxMode;
+  const deep = wxTooDeep();
+  svg.classList.toggle('wx', ready);
+  const onGlobe = ready && state.globe.on && !deep;
+  if (wxCanvas) wxCanvas.style.display = onGlobe ? 'block' : 'none';
+  if (wxTrail) wxTrail.style.display = onGlobe && wxMode === 'wind' ? 'block' : 'none';
+  if (wxFlatTrail) wxFlatTrail.style.display = wxMode === 'wind' ? 'block' : 'none';
+  const chip = $('#wx-chip');
+  chip.hidden = !wxOn;
+  syncWxTimeline();
+  if (!wxOn) return;
+  const m = WX_MODES[wxMode];
+  $('#wx-title').textContent = m.title;
+  $('#wx-bar').style.background = m.bar || wxBar(m.ramp);
+  $('#wx-ticks').innerHTML = m.ticks.map((t) => '<span>' + t + '</span>').join('');
+  const loading = wxIsLive(wxMode) ? (wxImg[wxMode] || {}).loading && !((wxImg[wxMode] || {}).frames || []).length : wxLoading && !wxData;
+  $('#wx-state').textContent = loading ? 'Loading…'
+    : wxIsLive(wxMode) ? WX_IMAGERY[wxMode].status
+      : 'NOAA GFS forecast' + (wxMode === 'wind' ? ' · flow sped up · storm cores from advisories' : '');
+}
+
+/* ---- drawing ----------------------------------------------------------- */
+// Globe: paint the current texture onto the sphere (called by the globe frame
+// whenever the view changes, and by the timeline whenever the picture does).
+function drawWx(moving) {
+  const S = wxShow;
+  if (!wxOn || !S || !wxCanvas || !state.globe.on || S.mode !== wxMode) return;
+  const hide = wxTooDeep();
+  const disp = hide ? 'none' : 'block';
+  if (wxCanvas.style.display !== disp) wxCanvas.style.display = disp;
+  if (wxTrail) wxTrail.style.display = hide || wxMode !== 'wind' ? 'none' : 'block';
+  if (hide) return;
+  if (!paintSphere(wxCanvas, moving ? 0.45 : 1, S.a, S.a.key)) return;
+  if (S.b && S.f > 0.01) paintSphere(wxCanvas, moving ? 0.45 : 1, S.b, S.b.key, S.f);
+  if (wxIsLive(wxMode)) {
+    const src = WX_IMAGERY[wxMode], fr = (wxImg[wxMode] || {}).frames || [], cur = fr[wxFrameIdx];
+    const met = stageMetrics(), z = Math.min(tileZoomFor(met), src.tileMax);
+    if (cur && z >= 3) {
+      drawTiles(z, wxCanvas.getContext('2d'), wxCanvas.width, wxCanvas.height, met, wxTileSource(wxMode, cur.t), true);
+    }
+  }
+  if (!state.satOn) {
+    // The SVG ocean is hidden while this layer is on (it would cover the canvas),
+    // so paint the sea back in underneath.
+    const met = stageMetrics(), k = wxCanvas.width / met.w, ctx = wxCanvas.getContext('2d');
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.fillStyle = '#0b1726';
+    ctx.beginPath();
+    ctx.arc(wxCanvas.width / 2, wxCanvas.height / 2, met.R * k, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+}
+
+// Flat map: blit the texture into the canvas that lives inside the SVG.
+function wxFlatPaint() {
+  const S = wxShow;
+  if (!wxFlatField || !S || S.mode !== wxMode) return;
+  // Bitmaps decode off the main thread; draw again once they are ready.
+  const bmp = (F) => {
+    if (F.bmp) return F.bmp;
+    if (!F.bmpP) F.bmpP = createImageBitmap(new ImageData(F.data, F.w, F.h)).then((b) => { F.bmp = b; if (wxOn && !state.globe.on) wxFlatPaint(); });
+    return null;
+  };
+  const a = bmp(S.a), b = S.b && S.f > 0.01 ? bmp(S.b) : null;
+  if (!a) return;
+  if (wxFlatField.width !== 2048) { wxFlatField.width = 2048; wxFlatField.height = 1024; }
+  const ctx = wxFlatField.getContext('2d');
+  ctx.clearRect(0, 0, 2048, 1024);
+  ctx.drawImage(a, 0, 0, 2048, 1024);
+  if (b) { ctx.globalAlpha = S.f; ctx.drawImage(b, 0, 0, 2048, 1024); ctx.globalAlpha = 1; }
+}
+
+/* ---- particles (wind mode) --------------------------------------------- */
+// Particles live in lon/lat and are stepped on the sphere itself (a short
+// great-circle move along the local wind), so nothing special happens at the
+// poles. On the globe each particle also remembers where it has been, and its
+// trail is re-projected from that history every frame: turning or zooming the
+// globe carries the streaks along instead of wiping them. One that leaves the
+// view is reborn somewhere visible, so the density on screen stays even.
+const WX_PARTS_PER_PX = 1 / 160;     // particle count scales with the map's area
+const WX_PARTS_MAX = 5000;
+const WX_HIST = 16;                  // trail points kept per particle
+const WX_HIST_SEC = 1 / 30;          // record a trail point this often (seconds), whatever the frame rate
+function wxSpawn(i, win) {
+  const P = wxParts;
+  if (win) {
+    // `win` (globe) is the stage metrics: start at a random point on screen.
+    for (let k = 0; k < 6; k++) {
+      const q = unprojectGlobe(Math.random() * win.w, Math.random() * win.h, win);
+      if (q) { P.lon[i] = q.lon; P.lat[i] = q.lat; break; }
+    }
+  } else {
+    P.lat[i] = Math.asin(Math.random() * 2 - 1) / RAD;
+    P.lon[i] = Math.random() * 360 - 180;
+  }
+  P.age[i] = 90 + Math.random() * 200;
+  P.hcount[i] = 0;
+  if (P.dead) P.dead[i] = 0;
+}
+function wxPartArrays(n) {
+  return {
+    n, lon: new Float32Array(n), lat: new Float32Array(n), age: new Float32Array(n), spd: new Float32Array(n),
+    hist: new Float32Array(n * WX_HIST * 3), hcount: new Uint8Array(n), hhead: new Uint8Array(n), dead: new Uint8Array(n), tick: 0, scale: 0,
+  };
+}
+function wxInitParts(win, n) {
+  wxParts = wxPartArrays(n);
+  for (let i = 0; i < n; i++) { wxSpawn(i, win); wxParts.age[i] *= Math.random(); }
+}
+// Grow or shrink the pool, keeping the particles (and trails) already there.
+function wxResizeParts(win, n) {
+  const old = wxParts, P = wxPartArrays(n), keep = Math.min(n, old.n);
+  for (const k of ['lon', 'lat', 'age', 'spd', 'hcount', 'hhead', 'dead']) P[k].set(old[k].subarray(0, keep));
+  P.hist.set(old.hist.subarray(0, keep * WX_HIST * 3));
+  P.tick = old.tick; P.scale = old.scale;
+  wxParts = P;
+  for (let i = keep; i < n; i++) wxSpawn(i, win);
+}
+
+// Move a point `de` east and `dn` north (both radians of arc) along the sphere.
+function wxMove(lon, lat, de, dn) {
+  const l = lon * RAD, f = lat * RAD, cl = Math.cos(l), sl = Math.sin(l), cf = Math.cos(f), sf = Math.sin(f);
+  const px = cf * cl, py = cf * sl, pz = sf;
+  const dx = -sl * de - sf * cl * dn, dy = cl * de - sf * sl * dn, dz = cf * dn;
+  const d = Math.hypot(dx, dy, dz);
+  if (d < 1e-12) return [lon, lat];
+  const c = Math.cos(d), s = Math.sin(d) / d;
+  const x = px * c + dx * s, y = py * c + dy * s, z = pz * c + dz * s;
+  return [Math.atan2(y, x) / RAD, Math.asin(clamp(z, -1, 1)) / RAD];
+}
+
+// Flat map: advance every particle by dt seconds and stroke the segment it
+// moved along onto a canvas that fades a little each frame (the flat canvas
+// lives inside the SVG and pans and zooms with it, so fading trails hold).
+function wxStepParts(dt, degPerKmh, win, toXY, ctx, lw) {
+  const P = wxParts, buckets = [[], [], []], k = degPerKmh * dt * RAD;
+  for (let i = 0; i < P.n; i++) {
+    P.age[i] -= dt * 60;
+    if (P.age[i] <= 0) { wxSpawn(i, win); continue; }
+    const lon = P.lon[i], lat = P.lat[i];
+    const a = toXY(lon, lat);
+    if (!a) { wxSpawn(i, win); continue; }
+    const uv = wxUV(lon, lat);
+    if (!uv) { wxSpawn(i, win); continue; }
+    const [nlon, nlat] = wxMove(lon, lat, uv[0] * k, uv[1] * k);
+    P.lon[i] = nlon; P.lat[i] = nlat;
+    const b = toXY(nlon, nlat);
+    if (!b || Math.abs(b[0] - a[0]) > 80) continue;
+    const s = Math.hypot(uv[0], uv[1]);
+    buckets[s < 12 ? 0 : s < 35 ? 1 : 2].push(a[0], a[1], b[0], b[1]);
+  }
+  ctx.lineWidth = lw;
+  ctx.lineCap = 'round';
+  const alpha = [0.45, 0.7, 0.95];
+  for (let b = 0; b < 3; b++) {
+    const seg = buckets[b];
+    if (!seg.length) continue;
+    ctx.beginPath();
+    for (let j = 0; j < seg.length; j += 4) { ctx.moveTo(seg[j], seg[j + 1]); ctx.lineTo(seg[j + 2], seg[j + 3]); }
+    ctx.strokeStyle = 'rgba(255,255,255,' + alpha[b] + ')';
+    ctx.stroke();
+  }
+}
+function wxFade(ctx, w, h, keep) {
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.fillStyle = 'rgba(0,0,0,' + keep + ')';
+  ctx.fillRect(0, 0, w, h);
+  ctx.globalCompositeOperation = 'source-over';
+}
+function wxClearTrails() {
+  for (const c of [wxTrail, wxFlatTrail]) if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  if (wxParts) wxParts.hcount.fill(0);
+}
+
+function wxGlobeParticles(dt) {
+  const met = stageMetrics();
+  if (!met.w || !wxTrail) return;
+  const q = dprCap();
+  const cw = Math.max(2, Math.round(met.w * q)), ch = Math.max(2, Math.round(met.h * q));
+  if (wxTrail.width !== cw || wxTrail.height !== ch) { wxTrail.width = cw; wxTrail.height = ch; }
+  const g = state.globe, ctx = wxTrail.getContext('2d');
+  const win = met;
+  // As many particles as the visible disc needs, whatever the zoom.
+  const disc = Math.min(met.w * met.h, Math.PI * met.R * met.R);
+  const n = Math.round(clamp(disc * WX_PARTS_PER_PX, 1200, WX_PARTS_MAX));
+  if (!wxParts || !wxParts.scale) { wxInitParts(win, n); wxParts.scale = g.scale; }
+  else if (Math.abs(wxParts.n - n) > n * 0.1) wxResizeParts(win, n);
+  const P = wxParts;
+  // Zooming out leaves every particle bunched in the patch that was on screen.
+  // Rehome each with the chance that it would not be there under an even
+  // spread (1 − area ratio), so the old patch keeps its fair share.
+  if (g.scale < P.scale * 0.97) {
+    const keep = (g.scale / P.scale) ** 2;
+    for (let i = 0; i < P.n; i++) if (Math.random() > keep) wxSpawn(i, win);
+  }
+  P.scale = g.scale;
+
+  const toXY = (lon, lat) => {
+    const p = globeProject(lon, lat);
+    if (!p.vis) return null;
+    const x = cw / 2 + (p.x - GX) * met.s * q, y = ch / 2 + (p.y - GY) * met.s * q;
+    return x < -40 || y < -40 || x > cw + 40 || y > ch + 40 ? null : [x, y];
+  };
+  // Constant on-screen speed whatever the zoom.
+  const k = WX_PART_GLOBE * 228 / Math.max(globeR(), 1) * dt * RAD;
+  P.tick += dt;
+  const record = P.tick >= WX_HIST_SEC;
+  if (record) P.tick %= WX_HIST_SEC;
+  for (let i = 0; i < P.n; i++) {
+    // An expired particle stops and its trail drains away from the tail, so
+    // streaks fade out rather than blinking off; then it is reborn.
+    if (P.dead[i]) {
+      if (record && P.hcount[i] > 0) P.hcount[i]--;
+      if (!P.hcount[i]) wxSpawn(i, win);
+      continue;
+    }
+    if (!toXY(P.lon[i], P.lat[i])) { wxSpawn(i, win); continue; }      // off screen: reborn in view
+    P.age[i] -= dt * 60;
+    if (P.age[i] <= 0) { P.dead[i] = 1; continue; }
+    const uv = wxUV(P.lon[i], P.lat[i]);
+    if (!uv) { wxSpawn(i, win); continue; }
+    if (record) {
+      // Stored as a unit vector, so redrawing it later is three dot products.
+      const h = P.hhead[i], o = (i * WX_HIST + h) * 3, l = P.lon[i] * RAD, f = P.lat[i] * RAD, cf = Math.cos(f);
+      P.hist[o] = cf * Math.cos(l); P.hist[o + 1] = cf * Math.sin(l); P.hist[o + 2] = Math.sin(f);
+      P.hhead[i] = (h + 1) % WX_HIST;
+      if (P.hcount[i] < WX_HIST) P.hcount[i]++;
+    }
+    const [nlon, nlat] = wxMove(P.lon[i], P.lat[i], uv[0] * k, uv[1] * k);
+    P.lon[i] = nlon; P.lat[i] = nlat;
+    P.spd[i] = Math.hypot(uv[0], uv[1]);
+  }
+
+  // Redraw every trail from its history: older points fainter, faster air brighter.
+  // The view as three axes: projecting a stored unit vector is then a rotation.
+  const l0 = g.lon * RAD, f0 = g.lat * RAD, cl0 = Math.cos(l0), sl0 = Math.sin(l0), cf0 = Math.cos(f0), sf0 = Math.sin(f0);
+  const Ex = -sl0, Ey = cl0, Nx = -sf0 * cl0, Ny = -sf0 * sl0, Nz = cf0, Vx = cf0 * cl0, Vy = cf0 * sl0, Vz = sf0;
+  const K = globeR() * met.s * q, hx = cw / 2, hy = ch / 2;
+  const AGES = 4, segs = [];
+  for (let b = 0; b < AGES * 3; b++) segs.push([]);
+  const H = WX_HIST, hist = P.hist;
+  // Hot loop: plain numbers only, no per-point allocation.
+  for (let i = 0; i < P.n; i++) {
+    const cnt = P.hcount[i];
+    if (!cnt) continue;
+    const sg = (P.spd[i] < 12 ? 0 : P.spd[i] < 35 ? 1 : 2) * AGES;
+    const l = P.lon[i] * RAD, f = P.lat[i] * RAD, cf = Math.cos(f);
+    const cx = cf * Math.cos(l), cy = cf * Math.sin(l), cz = Math.sin(f);
+    let px = 0, py = 0, have = false, run = -1;          // previous point, current polyline bucket
+    for (let j = 0; j <= cnt; j++) {
+      let x, y, z;
+      if (j === cnt) { x = cx; y = cy; z = cz; }
+      else {
+        const o = (i * H + (P.hhead[i] - cnt + j + H) % H) * 3;
+        x = hist[o]; y = hist[o + 1]; z = hist[o + 2];
+      }
+      if (x * Vx + y * Vy + z * Vz < 0) { have = false; run = -1; continue; }
+      const sx = hx + K * (x * Ex + y * Ey), sy = hy - K * (x * Nx + y * Ny + z * Nz);
+      if (sx < -40 || sy < -40 || sx > cw + 40 || sy > ch + 40) { have = false; run = -1; continue; }
+      if (have) {
+        // Consecutive segments in the same bucket join into one polyline;
+        // NaN starts a new one. Older points fainter.
+        const bk = sg + Math.min(AGES - 1, (j * AGES / (cnt + 1)) | 0), arr = segs[bk];
+        if (bk !== run) arr.push(NaN, px, py);
+        arr.push(sx, sy);
+        run = bk;
+      }
+      px = sx; py = sy; have = true;
+    }
+  }
+  ctx.clearRect(0, 0, cw, ch);
+  ctx.lineWidth = 1.25 * q;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const base = [0.5, 0.75, 1];
+  for (let sg = 0; sg < 3; sg++) {
+    for (let ag = 0; ag < AGES; ag++) {
+      const seg = segs[sg * AGES + ag];
+      if (!seg.length) continue;
+      ctx.beginPath();
+      for (let j = 0; j < seg.length;) {
+        if (seg[j] !== seg[j]) { ctx.moveTo(seg[j + 1], seg[j + 2]); j += 3; }    // NaN: new polyline
+        else { ctx.lineTo(seg[j], seg[j + 1]); j += 2; }
+      }
+      ctx.strokeStyle = 'rgba(255,255,255,' + (base[sg] * (0.15 + 0.85 * (ag + 1) / AGES)).toFixed(3) + ')';
+      ctx.stroke();
+    }
+  }
+}
+
+function wxFlatParticles(dt) {
+  const c = wxFlatTrail;
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  if (!wxParts || wxParts.n !== 5000) wxInitParts(null, 5000);
+  wxFade(ctx, c.width, c.height, 0.94);
+  const sx = c.width / 360, sy = c.height / 180;
+  const toXY = (lon, lat) => [(lon + 180) * sx, (90 - lat) * sy];
+  wxStepParts(dt, WX_PART_FLAT, null, toXY, ctx, 1.8);
+}
+
+/* ---- animation loop: timeline playback + wind particles ---------------- */
+function wxStart() {
+  if (wxRaf || !wxOn || document.hidden) return;
+  wxLastT = 0;
+  wxRaf = requestAnimationFrame(wxTick);
+}
+
+function wxTick(now) {
+  wxRaf = 0;
+  if (!wxOn || document.hidden) return;
+  const real = wxLastT ? Math.min((now - wxLastT) / 1000, 0.5) : 1 / 60;   // playback follows the clock
+  const dt = Math.min(real, 0.1);                                          // particles take small steps
+  wxLastT = now;
+  const still = reduceMotion.matches;
+  const globe = state.globe.on, deep = wxTooDeep();
+
+  if (wxPlaying) {
+    const tl = wxTimeline();
+    if (!tl) wxPlaying = false;
+    else if (tl.n) {
+      if (now - wxLastFrame > WX_FRAME_MS) {
+        wxLastFrame = now;
+        wxFrameIdx = (wxFrameIdx + 1) % tl.n;
+        wxRender();
+      }
+    } else {
+      wxT += real * WX_FORECAST_SPEED;
+      if (wxT > tl.last) wxT = tl.first;            // loop
+      if (now - wxLastField > WX_FIELD_MS) { wxLastField = now; wxRender(); }
+    }
+  }
+
+  const windy = wxMode === 'wind' && !!wxData && !!wxData.data[wxStepAt(wxT)[0]] && !deep;
+  if (windy && !still) {
+    if (globe) wxGlobeParticles(dt);
+    else wxFlatParticles(dt);
+  } else if (windy && still && !wxTick.settled) {
+    // Reduced motion: one settled frame of streamlines, then hold still.
+    wxTick.settled = true;
+    for (let k = 0; k < 40; k++) globe ? wxGlobeParticles(1 / 30) : wxFlatParticles(1 / 30);
+  }
+  if (!still) wxTick.settled = false;
+
+  // Keep running while there is something moving.
+  if (wxPlaying || (windy && !still)) wxRaf = requestAnimationFrame(wxTick);
+}
+
+// Particles were seeded for one view; when the map switches between globe
+// and flat they need a fresh spread.
+function wxModeChanged() {
+  wxParts = null;
+  wxViewSig = '';
+  wxClearTrails();
+  if (wxShow) { if (state.globe.on) drawWx(false); else wxFlatPaint(); }
+  wxStart();
+}
+
+/* ---- hover readout ----------------------------------------------------- */
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+function wxValueAt(lon, lat) {
+  if (!wxOn || !wxData || wxIsLive(wxMode)) return null;
+  const num = (key) => wxValue(key, lon, lat, wxT);
+  switch (wxMode) {
+    case 'temp': { const v = num('t'); return v == null ? null : (v < 0 ? '−' : '') + Math.abs(v).toFixed(0) + '°C'; }
+    case 'humidity': { const v = num('rh'); return v == null ? null : 'Humidity ' + Math.round(v) + '%'; }
+    case 'pressure': { const v = num('p'); return v == null ? null : Math.round(v) + ' hPa'; }
+    default: {
+      const uv = wxUV(lon, lat, wxT);
+      if (!uv) return null;
+      const s = Math.hypot(uv[0], uv[1]), to = Math.atan2(uv[0], uv[1]) / RAD;
+      const from = COMPASS[Math.round((((to + 180) % 360) + 360) % 360 / 45) % 8];
+      let txt = 'Wind ' + Math.round(s) + ' km/h' + (s >= 2 ? ' from ' + from : '');
+      // Inside a storm the calm eye can read low: say what the storm itself is doing.
+      for (const st of storms) {
+        if (!st.center || !(st.wind > 0)) continue;
+        let dlon = lon - st.center[0];
+        dlon -= 360 * Math.round(dlon / 360);
+        const km = Math.hypot(dlon * 111.32 * Math.cos(st.center[1] * RAD), (lat - st.center[1]) * 110.57);
+        if (km < 400) { txt += ' · ' + escapeHtml(st.name) + ' max ' + Math.round(st.wind) + ' km/h'; break; }
+      }
+      return txt;
+    }
   }
 }
 
@@ -2801,6 +3830,7 @@ function globeFrame() {
     const moving = g.auto || mapDragging || performance.now() - lastInput < 200;
     if (state.satOn) drawGlobeImagery(moving, met, globeTileZoom);
     drawEnso(moving);
+    drawWx(moving);
     updateMapChrome(met, globeTileZoom);
   }
   // satellites keep orbiting even when the globe is still
@@ -2865,6 +3895,8 @@ function setMapMode(mode) {
     : 'Ctrl + scroll to zoom · drag to pan · click a country';
   syncSatCanvas();
   syncEnso();
+  syncWx();
+  if (wxOn) wxModeChanged();
   syncSatOrbits();
   syncFlights();
   syncCams();
@@ -3084,13 +4116,6 @@ function setupMapInteraction() {
     syncSatCanvas(); markGlobeDirty(); scheduleSettle();
   };
 
-  $('#toggle-streets').onclick = () => {
-    state.mapStyle = state.mapStyle === 'streets' ? 'satellite' : 'streets';
-    $('#toggle-streets').classList.toggle('off', state.mapStyle !== 'streets');
-    ensureImagery();
-    markGlobeDirty(); scheduleSettle();
-  };
-
   // Runs after the map's own handlers, so a country or marker tooltip takes priority.
   stage.addEventListener('mousemove', (e) => {
     if (tooltip.classList.contains('show') && !tipIsCoordsOnly) return;
@@ -3109,6 +4134,29 @@ function setupMapInteraction() {
     }
     syncEnso(); markGlobeDirty(); scheduleSettle();
   };
+
+  $('#toggle-wx').onclick = () => {
+    wxOn = !wxOn;
+    $('#toggle-wx').classList.toggle('off', !wxOn);
+    if (wxOn) {
+      loadWeather();
+      wxRender();
+      // New imagery lands every few hours; checking twice an hour picks it up.
+      wxPoll = poll(wxRefresh, 30 * 60 * 1000);
+    } else {
+      unpoll(wxPoll); wxPoll = null;
+      cancelAnimationFrame(wxRaf); wxRaf = 0;
+      wxPlaying = false;
+      wxClearTrails();
+    }
+    syncWx(); markGlobeDirty(); scheduleSettle();
+  };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) wxStart(); });
+  reduceMotion.addEventListener('change', () => { if (wxOn) { wxClearTrails(); wxStart(); } });
+  for (const b of document.querySelectorAll('#wx-chip [data-wx]')) b.onclick = () => setWxMode(b.dataset.wx);
+  $('#wx-play').onclick = wxTogglePlay;
+  $('#wx-now').onclick = wxGoNow;
+  $('#wx-slider').addEventListener('input', (e) => wxSeekSlider(+e.target.value));
 
   $('#toggle-cams').onclick = () => {
     camsOn = !camsOn;
@@ -3186,13 +4234,6 @@ function setupMapInteraction() {
     openFlightCard(f);
   }, { capture: true });
 
-  $('#toggle-orbits').onclick = () => {
-    orbitsOn = !orbitsOn;
-    $('#toggle-orbits').classList.toggle('off', !orbitsOn);
-    if (orbitsOn) loadSatellites();
-    syncSatOrbits(); markGlobeDirty();
-  };
-
   // Active fires (NASA FIRMS) — opt-in; fetched on first enable.
   $('#toggle-fires').onclick = async () => {
     firesOn = !firesOn;
@@ -3204,7 +4245,7 @@ function setupMapInteraction() {
       btn.classList.remove('busy');
       if (!firesConfigured) {
         firesOn = false; btn.classList.add('off');
-        toast('Active-fire layer needs a free NASA FIRMS key (see README)', true);
+        toast('Active-fire data is unavailable right now', true);
         return;
       }
       if (!state.fires.length) toast('No active-fire detections available right now');
@@ -4397,6 +5438,11 @@ function init() {
   loadTexture();
   startGlobeLoop();
   if (new URLSearchParams(location.search).has('enso')) $('#toggle-enso').click();
+  {
+    // ?weather, ?weather=rain, ?weather=wind, ?weather=temp …
+    const want = new URLSearchParams(location.search).get('weather');
+    if (want !== null) { if (WX_MODES[want]) setWxMode(want); $('#toggle-wx').click(); }
+  }
 
   $('#search-form').addEventListener('submit', (e) => {
     e.preventDefault();

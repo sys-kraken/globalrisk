@@ -395,12 +395,36 @@
               <span class="fl-note" id="flight-note"></span>
             </div>
           </div>
+          <div class="map-chips">
+          <div class="enso-chip wx-chip" id="wx-chip" hidden>
+            <div class="wx-seg" role="group" aria-label="Weather layer">
+              <button type="button" data-wx="satellite" class="active" aria-pressed="true">Satellite</button>
+              <button type="button" data-wx="rain" aria-pressed="false">Rain</button>
+              <button type="button" data-wx="wind" aria-pressed="false">Wind</button>
+              <button type="button" data-wx="temp" aria-pressed="false">Temp</button>
+              <button type="button" data-wx="humidity" aria-pressed="false">Humidity</button>
+              <button type="button" data-wx="pressure" aria-pressed="false">Pressure</button>
+            </div>
+            <div class="enso-chip-title" id="wx-title">Satellite · infrared</div>
+            <div class="enso-chip-bar" id="wx-bar"></div>
+            <div class="enso-chip-ticks" id="wx-ticks"></div>
+            <div class="enso-chip-note" id="wx-state" role="status"></div>
+          </div>
           <div class="enso-chip" id="enso-chip" hidden>
             <div class="enso-chip-title">Sea temperature vs usual</div>
             <div class="enso-chip-bar"></div>
             <div class="enso-chip-ticks"><span>−3°C</span><span>0</span><span>+3°C</span></div>
             <div class="enso-chip-note" id="enso-chip-state" role="status"></div>
             <div class="enso-chip-note"><span id="enso-chip-date"></span> <a href="/el-nino">Full tracker</a></div>
+          </div>
+          </div>
+          <div class="wx-time" id="wx-time" hidden>
+            <button type="button" class="wx-play" id="wx-play" aria-label="Play" title="Play"><svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5v14l11-7z"/><path class="i-pause" d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></button>
+            <div class="wx-time-main">
+              <div class="wx-time-label"><span id="wx-when"></span><span class="wx-rel" id="wx-rel"></span></div>
+              <input type="range" id="wx-slider" min="0" max="1000" value="0" aria-label="Weather time">
+            </div>
+            <button type="button" class="wx-now" id="wx-now">Now</button>
           </div>
           <div class="map-scale" id="map-scale"><span class="ms-bar"></span><span class="ms-txt"></span></div>
           <div class="map-credit" id="map-credit"></div>
@@ -425,11 +449,6 @@
               id="fire-count"></span></span>
           <span class="layer-toggle l" id="toggle-labels"><span class="swatch"></span>Country Labels</span>
           <span class="layer-toggle s" id="toggle-sat"><span class="swatch"></span>Satellite</span>
-          <span class="layer-toggle st off" id="toggle-streets"
-            title="Street map — road names and building footprints instead of satellite photography"><span
-              class="swatch"></span>Streets</span>
-          <span class="layer-toggle o off" id="toggle-orbits" title="Live satellites in orbit (Starlink, ISS…)"><span
-              class="swatch"></span>Satellites<span id="orbit-count"></span></span>
           <span class="layer-toggle fp off" id="toggle-flights"
             title="Live aircraft from ADS-B — zoom in for callsigns, type and altitude"><span
               class="swatch"></span>Flights<span id="flight-count"></span></span>
@@ -437,6 +456,7 @@
             title="Public traffic cameras — click one for the authority's live view"><span
               class="swatch"></span>Cameras<span id="cam-count"></span></span>
           <span class="layer-toggle en off" id="toggle-enso" title="El Niño: NASA sea temperature compared with usual, with the Niño regions outlined"><span class="swatch"></span>El Niño</span>
+          <span class="layer-toggle wx off" id="toggle-wx" title="Weather: live satellite and rain imagery, plus wind, temperature, humidity and pressure forecasts"><span class="swatch"></span>Weather</span>
           <span class="grow"></span>
           <span class="map-hint" id="map-hint">Drag to spin · Ctrl+scroll to zoom · click a country</span>
           <span class="layer-toggle" id="toggle-fs" style="cursor:pointer" title="Full screen map"><svg class="i"

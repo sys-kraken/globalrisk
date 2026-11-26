@@ -44,6 +44,7 @@
     { "src": "/api/firms", "dest": "/api/firms.js" },
     { "src": "/api/flights", "dest": "/api/flights.js" },
     { "src": "/api/webcams", "dest": "/api/webcams.js" },
+    { "src": "/api/weather", "dest": "/api/weather.js" },
     { "src": "/robots.txt", "dest": "/robots.txt" },
     { "src": "/og-image.svg", "dest": "/og-image.svg" },
     { "src": "/sw.js", "dest": "/sw.js", "headers": { "Cache-Control": "no-cache", "Service-Worker-Allowed": "/" } },

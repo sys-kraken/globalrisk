@@ -4,8 +4,10 @@
  *
  *   GET /api/firms[?limit=1500]
  *
- * Needs a free MAP_KEY from https://firms.modaps.eosdis.nasa.gov/api/ set as
- * FIRMS_MAP_KEY. The key stays server-side (never shipped to the browser).
+ * With FIRMS_MAP_KEY set (a free MAP_KEY from
+ * https://firms.modaps.eosdis.nasa.gov/api/) it queries the area API; the key
+ * stays server-side. Without one it reads FIRMS's public, keyless "last 24h"
+ * global CSV files instead, so the layer works out of the box.
  *
  * A single global ("world") VIIRS query is ~6 MB and FIRMS 502s on it, so we
  * fetch the world as a grid of bounding-box tiles in parallel and merge them —
@@ -87,6 +89,28 @@ async function fetchTile(area) {
   return parseRows(text);
 }
 
+// Keyless: FIRMS's open 24-hour global files. MODIS goes first: it is ~1 MB
+// against VIIRS's ~5 MB, and since only the KEEP strongest fires are kept,
+// the extra small VIIRS detections would be dropped anyway. A satellite that
+// had a bad day publishes a header-only file, so fall through to the next.
+const PUBLIC_FILES = [
+  ['MODIS_NRT', 'https://firms.modaps.eosdis.nasa.gov/data/active_fire/modis-c6.1/csv/MODIS_C6_1_Global_24h.csv'],
+  ['VIIRS_NOAA20_NRT', 'https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_Global_24h.csv'],
+  ['VIIRS_SNPP_NRT', 'https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_Global_24h.csv'],
+];
+async function fetchPublic() {
+  let lastErr = null;
+  for (const [source, url] of PUBLIC_FILES) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) throw new Error('FIRMS ' + r.status);
+      const rows = parseRows(await r.text());
+      if (rows.length) return { source, rows };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('no public fire data');
+}
+
 async function readShared() {
   if (!store || !store.configured()) return null;
   try { const v = await store.cmd(['GET', SHARED_KEY]); return v ? JSON.parse(v) : null; }
@@ -99,7 +123,6 @@ function writeShared(body) {
 
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  if (!KEY) return res.status(200).json({ configured: false, fires: [] });
   const limit = Math.min(Math.max(parseInt(req.query && req.query.limit, 10) || 1500, 100), KEEP);
   const reply = (body, extra) => {
     const sliced = body.fires.slice(0, limit);
@@ -111,6 +134,19 @@ module.exports = async (req, res) => {
   // L2: shared Upstash cache (fast; avoids the slow global fetch on cold starts)
   const shared = await readShared();
   if (shared && shared.fires) { cache = { at: Date.now(), body: shared }; return reply(shared, { cached: 'shared' }); }
+
+  if (!KEY) {
+    try {
+      const { source, rows } = await fetchPublic();
+      rows.sort((a, b) => b.frp - a.frp);
+      const body = { configured: true, source, total: rows.length, fires: rows.slice(0, KEEP) };
+      cache = { at: Date.now(), body };
+      writeShared(body);
+      return reply(body);
+    } catch (e) {
+      return res.status(502).json({ configured: true, error: e.message, fires: [] });
+    }
+  }
 
   try {
     const tiles = worldTiles();

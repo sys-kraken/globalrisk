@@ -228,6 +228,7 @@ http
       if ((m = /^\/guides\/([^/]+)$/.exec(p))) return to('t=guide&slug=' + m[1]);
     }
     if (u.pathname === '/api/webcams') return mountVercel('./api/webcams', req, res, u);
+    if (u.pathname === '/api/weather') return mountVercel('./api/weather', req, res, u);
     handleStatic(res, u.pathname);
   })
   .listen(PORT, () => {

@@ -706,7 +706,6 @@ body {
 .layer-toggle.a .swatch { border-color: var(--sev-extreme); background: rgba(255,59,82,0.25); }
 .layer-toggle.l .swatch { border-color: var(--ink-dim); background: rgba(223,234,255,0.25); }
 .layer-toggle.s .swatch { border-color: var(--green); background: rgba(53,208,127,0.28); }
-.layer-toggle.st .swatch { border-color: var(--cyan); background: rgba(56,225,255,0.28); }
 .layer-toggle.fp .swatch { border-color: #ecf1ff; background: rgba(236,241,255,0.35); box-shadow: 0 0 6px rgba(160,200,255,0.55); }
 .layer-toggle.cm .swatch { border-color: #ff7ac6; background: rgba(255,122,198,0.35); box-shadow: 0 0 6px rgba(255,122,198,0.5); }
 #cam-count { margin-left: 5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
@@ -1856,8 +1855,12 @@ body {
 #enso-boxes text { fill: #fff; font: 7px system-ui, sans-serif; paint-order: stroke; stroke: rgba(0,0,0,0.85); stroke-width: 2px; }
 /* These two paint opaquely over the canvases when the satellite layer is off. */
 #map.globe.enso .g-ocean, #map.globe.enso .g-shade { display: none; }
+.map-chips {
+  position: absolute; left: 10px; bottom: 28px; z-index: 12;
+  display: flex; flex-direction: column; gap: 6px; pointer-events: none;
+}
 .enso-chip {
-  position: absolute; left: 10px; bottom: 28px; z-index: 12; width: 196px; padding: 8px 10px;
+  pointer-events: auto; width: 196px; padding: 8px 10px;
   background: rgba(13,13,13,0.86); border: 1px solid var(--line); border-radius: 8px; font-size: 11px; color: var(--ink);
 }
 .enso-chip[hidden] { display: none; }
@@ -1871,12 +1874,67 @@ body {
 .enso-chip-note { font-size: 10.5px; line-height: 1.45; color: var(--ink-dim); }
 .enso-chip-note:empty { display: none; }
 @media (max-width: 720px) {
-  .enso-chip { width: 142px; padding: 6px 8px; font-size: 10px; bottom: 26px; }
+  .map-chips { bottom: 26px; }
+  .enso-chip { width: 142px; padding: 6px 8px; font-size: 10px; }
+  #wx-state { display: none; }
+  .wx-seg button { padding: 3px 0; font-size: 9.5px; }
   #enso-chip-state { display: none; }
   .enso-chip-note { font-size: 9.5px; }
 }
 .enso-chip a { color: var(--cyan); text-decoration: none; white-space: nowrap; }
 .enso-chip a:hover { text-decoration: underline; }
+
+/* ---------- Weather layer (clouds / humidity / wind) -------------------- */
+.layer-toggle.wx .swatch { border-color: #9fd3ff; background: linear-gradient(90deg, #e8f4ff, #35978f, #e0d040); }
+#wx-flat { display: none; pointer-events: none; overflow: hidden; }
+#map.wx:not(.globe) #wx-flat { display: block; }
+#wx-flat canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+/* The SVG ocean would cover the weather canvas; drawWx paints the sea back in. */
+#map.globe.wx .g-ocean, #map.globe.wx .g-shade { display: none; }
+/* Land fills would hide the weather over land, so outline the countries instead. */
+#map.wx:not(.sat) .country { fill: rgba(255,255,255,0.04); stroke: rgba(255,255,255,0.45); }
+#map.wx:not(.sat) .country:hover { fill: rgba(56,225,255,0.16); }
+.wx-seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; margin-bottom: 7px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; }
+.wx-seg button {
+  flex: 1; padding: 4px 0; border: 0; border-radius: 4px; background: transparent; color: var(--ink-dim);
+  font: inherit; font-size: 10.5px; cursor: pointer;
+}
+.wx-seg button:hover { color: var(--ink); }
+.wx-seg button.active { background: rgba(56,225,255,0.16); color: var(--ink); }
+.wx-seg button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+
+/* Timeline bar, bottom centre of the map (Zoom Earth style) */
+.wx-time {
+  position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 12;
+  display: flex; align-items: center; gap: 10px; width: min(440px, calc(100% - 240px)); padding: 7px 10px;
+  background: rgba(13,13,13,0.86); border: 1px solid var(--line); border-radius: 12px; color: var(--ink);
+}
+.wx-time[hidden] { display: none; }
+.wx-play {
+  flex: none; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
+  background: rgba(56,225,255,0.12); color: var(--ink); cursor: pointer; display: grid; place-items: center; padding: 0;
+}
+.wx-play svg { width: 16px; height: 16px; fill: currentColor; }
+.wx-play .i-pause, .wx-play.playing .i-play { display: none; }
+.wx-play.playing .i-pause { display: inline; }
+.wx-play:hover { background: rgba(56,225,255,0.22); }
+.wx-time-main { flex: 1; min-width: 0; }
+.wx-time-label { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; font-weight: 600; margin-bottom: 3px; white-space: nowrap; }
+.wx-rel { color: var(--cyan); font-weight: 500; }
+#wx-slider { width: 100%; margin: 0; accent-color: var(--cyan); cursor: pointer; }
+.wx-now {
+  flex: none; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: transparent;
+  color: var(--ink); font: inherit; font-size: 11px; cursor: pointer;
+}
+.wx-now:disabled { opacity: 0.4; cursor: default; }
+.wx-play:focus-visible, .wx-now:focus-visible, #wx-slider:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+@media (max-width: 720px) {
+  .wx-time { left: auto; right: 8px; transform: none; bottom: 26px; width: calc(100% - 172px); gap: 6px; padding: 5px 7px; }
+  .wx-play { width: 28px; height: 28px; }
+  .wx-now { display: none; }
+  .wx-time-label { font-size: 10px; }
+  .wx-rel { display: none; }
+}
 .legal-page.wide .legal-header, .legal-page.wide .legal-shell { max-width: none; }
 .enso-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 44px; align-items: start; margin-top: 8px; }
 .enso-cols > div { min-width: 0; }
